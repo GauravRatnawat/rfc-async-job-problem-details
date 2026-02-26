@@ -1,0 +1,27 @@
+{
+  "type": "https://api.example.com/problems/batch-partial",
+  "title": "Batch Processing Partially Failed",
+  "status": 207,
+  "detail": "2 of 3 certificates generated successfully",
+  "jobId": "batch-a1b2c3d4",
+  "jobStatus": "COMPLETED_WITH_ERRORS",
+  "submittedAt": "2026-02-26T14:00:00Z",
+  "completedAt": "2026-02-26T14:00:12Z",
+  "results": [
+    {
+      "itemId": "cert-001",
+      "status": "COMPLETED"
+    },
+    {
+      "itemId": "cert-002",
+      "status": "FAILED",
+      "detail": "Required field 'recipientName' missing",
+      "retryable": false,
+      "processingStage": "validation"
+    },
+    {
+      "itemId": "cert-003",
+      "status": "COMPLETED"
+    }
+  ]
+}

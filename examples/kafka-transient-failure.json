@@ -1,0 +1,14 @@
+{
+  "type": "https://api.example.com/problems/downstream-unavailable",
+  "title": "Downstream Service Temporarily Unavailable",
+  "status": 503,
+  "detail": "Data warehouse connection pool exhausted; service is expected to recover within 60 seconds",
+  "jobId": "e5f6a7b8-9012-3456-7890-abcdef123456",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T18:00:00Z",
+  "completedAt": "2026-02-26T18:00:01Z",
+  "retryable": true,
+  "retryAfter": 60,
+  "processingStage": "processing",
+  "correlationId": "weekly-report-2026-w09"
+}

@@ -1,0 +1,25 @@
+{
+  "type": "https://api.example.com/problems/batch-partial",
+  "title": "Data Export Partially Failed",
+  "status": 207,
+  "detail": "8 of 10 records exported successfully",
+  "jobId": "export-batch-20260226",
+  "jobStatus": "COMPLETED_WITH_ERRORS",
+  "submittedAt": "2026-02-26T12:00:00Z",
+  "completedAt": "2026-02-26T12:15:00Z",
+  "results": [
+    {
+      "itemId": "rec-007",
+      "status": "FAILED",
+      "detail": "Record exceeds maximum size (10MB)",
+      "retryable": false
+    },
+    {
+      "itemId": "rec-009",
+      "status": "FAILED",
+      "detail": "Downstream storage timeout",
+      "retryable": true,
+      "processingStage": "storage"
+    }
+  ]
+}

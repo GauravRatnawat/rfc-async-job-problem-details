@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ietf:params:json-schema:async-job-problem-details",
+  "title": "Async Job Problem Details Extensions",
+  "description": "Extension members for RFC 9457 Problem Details objects that describe asynchronous job outcomes. See draft-ratnawat-httpapi-async-problem-details-00.",
+  "type": "object",
+  "properties": {
+    "jobId": {
+      "type": "string",
+      "description": "Unique identifier for the async job.",
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "jobStatus": {
+      "type": "string",
+      "description": "Current state of the async job. Registered values are ACCEPTED, PROCESSING, COMPLETED, FAILED, CANCELLED, TIMED_OUT, and COMPLETED_WITH_ERRORS. Servers MAY define additional values per Section 4.3.",
+      "examples": ["FAILED", "COMPLETED", "TIMED_OUT"]
+    },
+    "submittedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp (UTC) when the job was accepted for processing.",
+      "examples": ["2026-02-26T10:00:00Z"]
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp (UTC) when the job reached a terminal state.",
+      "examples": ["2026-02-26T10:00:05Z"]
+    },
+    "retryable": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the client should retry the job with the same input."
+    },
+    "retryAfter": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds to wait before retrying. Only meaningful when retryable is true."
+    },
+    "processingStage": {
+      "type": "string",
+      "description": "The pipeline stage at which the failure occurred.",
+      "examples": ["validation", "rendering", "conversion"]
+    },
+    "correlationId": {
+      "type": "string",
+      "description": "Client-supplied correlation identifier from the originating request.",
+      "examples": ["4bf92f3577b34da6a3ce929d0e0e4736"]
+    },
+    "results": {
+      "type": "array",
+      "description": "Per-item outcomes for batch operations.",
+      "items": {
+        "type": "object",
+        "required": ["itemId", "status"],
+        "properties": {
+          "itemId": {
+            "type": "string",
+            "description": "Identifier for the batch item."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "COMPLETED",
+              "FAILED",
+              "CANCELLED",
+              "TIMED_OUT"
+            ],
+            "description": "Terminal outcome for this item."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable outcome description."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether this item can be retried."
+          },
+          "processingStage": {
+            "type": "string",
+            "description": "Stage at which this item failed."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "dependentSchemas": {
+    "retryAfter": {
+      "properties": {
+        "retryable": { "const": true }
+      },
+      "required": ["retryable"]
+    }
+  },
+  "additionalProperties": true
+}

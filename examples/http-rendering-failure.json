@@ -1,0 +1,14 @@
+{
+  "type": "https://api.example.com/problems/rendering-failed",
+  "title": "Document Rendering Failed",
+  "status": 500,
+  "detail": "Template 'invoice-v2' contains an unclosed element at line 87",
+  "instance": "/api/v1/documents/generate",
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T10:00:00Z",
+  "completedAt": "2026-02-26T10:00:03Z",
+  "retryable": false,
+  "processingStage": "rendering",
+  "correlationId": "4bf92f3577b34da6a3ce929d0e0e4736"
+}

@@ -1,0 +1,13 @@
+{
+  "type": "https://api.example.com/problems/conversion-failed",
+  "title": "PDF Conversion Failed",
+  "status": 502,
+  "detail": "iText HTML-to-PDF conversion failed: malformed CSS at line 15",
+  "jobId": "d4735e3a-265e-16d0-8f24-2de10e933e80",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T16:30:00Z",
+  "completedAt": "2026-02-26T16:30:02Z",
+  "retryable": false,
+  "processingStage": "conversion",
+  "correlationId": "monthly-report-2026-02"
+}

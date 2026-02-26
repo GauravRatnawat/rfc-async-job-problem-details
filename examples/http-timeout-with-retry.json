@@ -1,0 +1,13 @@
+{
+  "type": "https://api.example.com/problems/job-timed-out",
+  "title": "Job Processing Timed Out",
+  "status": 504,
+  "detail": "Job exceeded maximum processing time of 300s",
+  "jobId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "jobStatus": "TIMED_OUT",
+  "submittedAt": "2026-02-26T09:00:00Z",
+  "completedAt": "2026-02-26T09:05:00Z",
+  "retryable": true,
+  "retryAfter": 60,
+  "processingStage": "processing"
+}
