@@ -17,7 +17,8 @@ Abstract
 
    Eight extension members are specified: "jobId", "jobStatus",
    "submittedAt", "completedAt", "retryable", "retryAfter",
-   "processingStage", and "correlationId".  Together they let a
+   "processingStage", and "correlationId".  A ninth member,
+   "results", supports batch operations.  Together they let a
    server describe which job failed, when, at what pipeline stage,
    and whether a retry is advisable -- in a single, machine-readable
    JSON [RFC8259] object that works equally well in an HTTP response
@@ -106,9 +107,8 @@ Table of Contents
    6.7.  RFC 6585 — Additional HTTP Status Codes (429)
    6.8.  RFC 9562 — UUIDs
    6.9.  RFC 6901 — JSON Pointer
-   6.10. RFC 8615 — Well-Known URIs
-   6.11. draft-ietf-httpapi-idempotency-key-header
-   6.12. draft-ietf-httpapi-ratelimit-headers
+   6.10. draft-ietf-httpapi-idempotency-key-header
+   6.11. draft-ietf-httpapi-ratelimit-headers
    7.  Batch Operations
    7.1.  The "results" Extension Member
    7.2.  Partial Failure Semantics
@@ -193,8 +193,8 @@ Table of Contents
       [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110).
 
    *  How to poll for job status.  Use the URI from the "Location"
-      header of the 202 response, or a link with rel="monitor"
-      [RFC 8288](https://www.rfc-editor.org/rfc/rfc8288).
+      header of the 202 response, or a link relation pointing to
+      the job status resource [RFC 8288](https://www.rfc-editor.org/rfc/rfc8288).
 
    *  How to cancel a running job.  This is operation-specific.
 
@@ -272,7 +272,8 @@ Table of Contents
       of the "Location" header returned in a "202 Accepted" response.
 
    terminal state:  A job status from which no further transitions
-      are possible (COMPLETED, FAILED, CANCELLED, TIMED_OUT).
+      are possible (COMPLETED, FAILED, CANCELLED, TIMED_OUT,
+      COMPLETED_WITH_ERRORS).
 
    non-terminal state:  A job status from which the job may still
       transition (ACCEPTED, PROCESSING, and any server-defined
@@ -289,7 +290,7 @@ Table of Contents
    [RFC9457] defines five standard members for problem details
    objects: "type", "title", "status", "detail", and "instance".
    It explicitly allows extension members for domain-specific data
-   (Section 3.1 of [RFC9457]).
+   (Section 3.2 of [RFC9457]).
 
    However, [RFC9457] does not define any reusable extension members.
    Each API defines its own, leading to fragmentation.  For the
@@ -330,7 +331,7 @@ Table of Contents
 
 2.3.  Survey of Current Practice
 
-   The following table surveys how five major platforms represent
+   The following table surveys how four major platforms represent
    async job failures today.  No two use the same field names.
 
    +--------------------+------------+----------+----------+----------+
@@ -423,6 +424,20 @@ Table of Contents
    problem details JSON object, alongside the standard [RFC9457]
    members ("type", "title", "status", "detail", "instance").
 
+   Although defined as [RFC9457] extension members, these JSON member
+   names and semantics MAY also be used in non-problem-details JSON
+   objects (e.g., successful job status responses).  When used
+   outside a problem details context, the [RFC9457] standard members
+   ("type", "title", "status", "detail", "instance") are not
+   required.  However, when reporting failures,
+   "application/problem+json" SHOULD be used per [RFC9457].
+
+   In all non-HTTP transport contexts (message brokers, webhooks,
+   SSE), the "status" member represents the HTTP status code that
+   WOULD have been used if the failure had been reported in a
+   synchronous HTTP response.  It is not the HTTP status code of
+   the delivery mechanism.
+
 3.1.1.  Conformance Levels
 
    To provide interoperability guidance while preserving flexibility,
@@ -477,6 +492,10 @@ Table of Contents
 
    *  Type: string (case-sensitive, enumerated)
 
+   *  Constraints: Consumers MUST perform case-sensitive string
+      comparison when matching "jobStatus" values against the
+      registered values in Section 4.
+
    *  When to include: RECOMMENDED whenever reporting an async job
       outcome.
 
@@ -509,7 +528,12 @@ Table of Contents
    *  Type: string (date-time per [RFC3339])
 
    *  Constraints: MUST be in UTC.  MUST NOT be present when the
-      job is in a non-terminal state.
+      job is in a non-terminal state.  When the problem details
+      object is published to a message broker or delivered via
+      webhook, the producer MUST ensure that "completedAt" is
+      absent if "jobStatus" is a non-terminal value at the time
+      of publication.  Consumers that encounter this inconsistency
+      SHOULD log a warning and ignore the "completedAt" value.
 
    *  When to include: RECOMMENDED when the job has reached a
       terminal state.
@@ -565,15 +589,34 @@ Table of Contents
         slow down), but clients SHOULD NOT interpret this as
         permission to retry a deterministically failed job.
       - SHOULD be present when "retryable" is "true".
+      - A value of 0 is syntactically valid but clients MUST NOT
+        interpret it as "retry immediately"; see Section 9.4 for
+        minimum backoff requirements.
 
    *  Semantics: Equivalent to the "Retry-After" header field
       ([RFC9110] Section 10.2.3) expressed as seconds, but embedded
       in the JSON body for transport independence.
 
+   *  Temporal reference: The "retryAfter" value represents the
+      minimum number of seconds to wait before retrying, measured
+      from the value of "completedAt" (if present).  When
+      "completedAt" is absent, the value is measured from the time
+      the consumer receives the problem details object.
+
+      For non-HTTP transports where delivery delay is possible
+      (e.g., a lagging Kafka consumer), consumers SHOULD compute
+      the effective wait time as: retryAfter - (now - completedAt).
+      If the result is zero or negative, the consumer MAY retry
+      immediately (subject to the minimum backoff floor in
+      Section 9.4).
+
    *  Client-side safety: Regardless of the value of "retryAfter",
       clients MUST enforce a minimum backoff floor (e.g., 1 second)
       to prevent tight retry loops in case of a misconfigured or
-      malicious server.  See Section 9.4.
+      malicious server.  Clients SHOULD also enforce a maximum
+      retry delay (e.g., 3600 seconds) beyond which the
+      "retryAfter" value is treated as indicating that a retry is
+      impractical.  See Section 9.4.
 
    *  Relationship to draft-ietf-httpapi-ratelimit-headers: The
       RateLimit header fields defined in that draft apply to the
@@ -607,22 +650,11 @@ Table of Contents
       API-specific because processing pipelines vary too widely
       across domains.  The interoperability benefit of this member
       comes from its structured presence (enabling tools to extract
-      and display the stage), not from standardized values.  The
-      recommended names in Table 3 provide a starting vocabulary;
-      servers MAY define others.
+      and display the stage), not from standardized values.
 
-   This member is unique to this specification; no existing IETF
-   document or major cloud provider pattern includes pipeline stage
-   identification in job failure reports (see Table 2).  It is
-   particularly valuable for:
-
-   *  Distinguishing input validation failures (client's fault)
-      from downstream processing failures (server's fault).
-
-   *  Enabling automated alerting on specific pipeline stages.
-
-   *  Reducing mean-time-to-resolution by directing operators to
-      the failing component.
+      Servers SHOULD use the stage names from Table 3 when
+      applicable, and MAY define additional names for domain-
+      specific stages.
 
    Recommended stage names (servers MAY define others):
 
@@ -668,7 +700,9 @@ Table of Contents
    *  Type: string
 
    *  Constraints: The value is client-supplied and MUST be treated
-      as untrusted (see Section 9.2).
+      as untrusted (see Section 9.2).  Servers SHOULD enforce a
+      maximum length (e.g., 256 characters) and reject or truncate
+      values that exceed it.  See Section 9.2.
 
    *  When to include: RECOMMENDED when the originating request
       included a correlation identifier (e.g., via the
@@ -802,6 +836,10 @@ Table of Contents
       delivery, not the job.  The "status" member inside the
       problem details object conveys the job-level status.
 
+   *  Servers SHOULD sign webhook deliveries using HTTP Message
+      Signatures [RFC9421] to allow recipients to verify authenticity.
+      See Section 6.6.
+
    *  The "retryAfter" member applies to job resubmission, NOT to
       webhook delivery retry.  Webhook delivery retry is a concern
       of the delivery mechanism, not this specification.
@@ -832,7 +870,7 @@ Table of Contents
 6.1.  RFC 9457 — Problem Details for HTTP APIs
 
    This document extends [RFC9457] by defining reusable extension
-   members per Section 3.1 of that specification.  All standard
+   members per Section 3.2 of that specification.  All standard
    [RFC9457] members ("type", "title", "status", "detail",
    "instance") retain their original semantics.
 
@@ -843,9 +881,11 @@ Table of Contents
       present.  This enables consumers to distinguish async job
       failures from generic HTTP errors.
 
-   *  "instance" SHOULD be set to the URI of the originating request
-      (e.g., "/api/v1/documents/generate"), enabling consumers to
-      correlate the failure with the request that triggered it.
+   *  "instance" SHOULD identify the specific occurrence of the
+      problem, per [RFC9457] Section 3.1.5.  For async jobs, this
+      is typically the URI of the job status resource (e.g.,
+      "/api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000"),
+      enabling consumers to dereference it for full details.
 
    *  "status" represents the HTTP status code that WOULD have been
       returned if the job had been processed synchronously.
@@ -888,8 +928,9 @@ Table of Contents
 
    Servers that return 202 Accepted SHOULD include a "Link" header
    with a relation type that points to the job status resource.
-   The relation type "monitor" (as defined in
-   [RFC7089] Section 6) or a custom relation type MAY be used.
+   Servers MAY use the registered "status" relation type
+   [RFC8631] or a URI-based extension relation type as described
+   in Section 2.1.2 of [RFC8288].
 
    When a completed or failed job's status response includes a
    link to the result resource, the server SHOULD use a URI-based
@@ -945,14 +986,7 @@ Table of Contents
    references), but defining such extensions is outside the scope
    of this document.
 
-6.10. RFC 8615 — Well-Known URIs
-
-   Servers MAY expose a "/.well-known/async-job-schema" resource
-   that returns the JSON Schema (Section 8) describing the
-   extension members supported by the API.  This enables
-   automated client generation and validation.
-
-6.11. draft-ietf-httpapi-idempotency-key-header
+6.10. draft-ietf-httpapi-idempotency-key-header
 
    When a client resubmits a failed job (guided by "retryable":
    true), it SHOULD include an "Idempotency-Key" header per
@@ -962,7 +996,7 @@ Table of Contents
    The "jobId" from the failed job SHOULD NOT be reused as the
    idempotency key, because the retry is a new job submission.
 
-6.12. draft-ietf-httpapi-ratelimit-headers
+6.11. draft-ietf-httpapi-ratelimit-headers
 
    The RateLimit header fields defined in
    draft-ietf-httpapi-ratelimit-headers apply to HTTP request
@@ -985,10 +1019,17 @@ Table of Contents
 
    *  "itemId" (string): An identifier for the item within the
       batch.  The value is server-defined and SHOULD correspond
-      to an identifier from the original batch request.
+      to an identifier from the original batch request.  If the
+      original batch request does not assign item identifiers,
+      the server SHOULD assign them (e.g., zero-based array
+      indices as strings: "0", "1", "2") and document the
+      assignment scheme in the API specification.
 
    *  "status" (string): A terminal job status value from
-      Section 4.
+      Section 4.  Note: "COMPLETED_WITH_ERRORS" is not valid
+      for individual batch items because a single item cannot
+      itself be a partial batch; only the top-level batch
+      "jobStatus" uses this value.
 
    Each object MAY additionally contain:
 
@@ -1035,7 +1076,9 @@ Table of Contents
    *  The "jobStatus" SHOULD be "COMPLETED_WITH_ERRORS".
 
    *  The "status" member (HTTP status equivalent) SHOULD be 207
-      (Multi-Status), per [RFC4918] Section 13.
+      (Multi-Status), as defined in [RFC4918] Section 13.  Note
+      that 207 was originally defined for WebDAV; its use in JSON
+      batch APIs is a widely adopted industry convention.
 
    *  The "detail" member SHOULD summarize the outcome
       (e.g., "3 of 5 items completed successfully").
@@ -1050,7 +1093,7 @@ Table of Contents
 
      {
        "$schema": "https://json-schema.org/draft/2020-12/schema",
-       "$id": "urn:ietf:params:json-schema:async-job-problem-details",
+       "$id": "https://example.com/schemas/async-job-problem-details",
        "title": "Async Job Problem Details Extensions",
        "description": "Extension members for RFC 9457 Problem Details
          objects that describe asynchronous job outcomes.",
@@ -1143,14 +1186,6 @@ Table of Contents
              },
              "additionalProperties": true
            }
-         }
-       },
-       "dependentSchemas": {
-         "retryAfter": {
-           "properties": {
-             "retryable": { "const": true }
-           },
-           "required": ["retryable"]
          }
        },
        "additionalProperties": true
@@ -1289,37 +1324,17 @@ Table of Contents
 10.1. Problem Details Extension Members
 
    This document defines extension members for [RFC9457] problem
-   details objects.  [RFC9457] does not establish a registry for
-   extension members; they exist in a single, global namespace
-   within the JSON object.
+   details objects per the extension mechanism in Section 3.2 of
+   [RFC9457].  As [RFC9457] does not establish a registry for
+   extension members, the members defined in this document
+   ("jobId", "jobStatus", "submittedAt", "completedAt",
+   "retryable", "retryAfter", "processingStage", "correlationId",
+   and "results") are specified here and do not require IANA
+   registration.
 
-   To aid discoverability, this document requests that IANA
-   create a new "Problem Details Extension Members" registry with
-   the following initial entries:
-
-   +------------------+----------+-----------------------------------+
-   | Member Name      | Type     | Reference                         |
-   +==================+==========+===================================+
-   | jobId            | string   | Section 3.2 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | jobStatus        | string   | Section 3.3 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | submittedAt      | string   | Section 3.4 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | completedAt      | string   | Section 3.5 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | retryable        | boolean  | Section 3.6 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | retryAfter       | integer  | Section 3.7 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | processingStage  | string   | Section 3.8 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | correlationId    | string   | Section 3.9 of [this document]    |
-   +------------------+----------+-----------------------------------+
-   | results          | array    | Section 7.1 of [this document]    |
-   +------------------+----------+-----------------------------------+
-
-   Registration policy: Specification Required [RFC8126].
+   Implementers that define additional extension members for
+   async job problem details SHOULD choose names that do not
+   conflict with the members defined in this document.
 
 10.2. Job Status Value Registry
 
@@ -1328,6 +1343,22 @@ Table of Contents
    Table 4 (Section 4.1).
 
    Registration policy: Specification Required [RFC8126].
+
+   Each registration MUST include:
+
+   *  Status Value: An UPPER_SNAKE_CASE string (e.g., "PAUSED").
+
+   *  Terminal: Whether this status is terminal (yes/no).
+
+   *  Description: A brief description of the status meaning.
+
+   *  Reference: A reference to the specification defining the
+      status value.
+
+   The designated expert(s) SHOULD verify that proposed values
+   use UPPER_SNAKE_CASE, do not duplicate the semantics of
+   existing registered values, and are clearly documented as
+   either terminal or non-terminal.
 
 10.3. Problem Type URIs
 
@@ -1368,7 +1399,7 @@ Table of Contents
        "status": 500,
        "detail": "Template 'invoice-v2' contains an unclosed element
          at line 87",
-       "instance": "/api/v1/documents/generate",
+       "instance": "/api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000",
        "jobId": "550e8400-e29b-41d4-a716-446655440000",
        "jobStatus": "FAILED",
        "submittedAt": "2026-02-26T10:00:00Z",
@@ -1532,7 +1563,7 @@ Table of Contents
 
      HTTP/1.1 200 OK
      Content-Type: application/json
-     Link: <https://api.example.com/rels/job-result>;
+     Link: <https://api.example.com/api/v1/documents/results/a1b2c3d4>;
            rel="https://api.example.com/rels/job-result"
 
      {
@@ -1649,21 +1680,14 @@ Table of Contents
               RFC 6901, DOI 10.17487/RFC6901, April 2013,
               <https://www.rfc-editor.org/info/rfc6901>.
 
-   [RFC7089]  Van de Sompel, H., Nelson, M., and R. Sanderson,
-              "HTTP Framework for Time-Based Access to Resource
-              States -- Memento", RFC 7089,
-              DOI 10.17487/RFC7089, December 2013,
-              <https://www.rfc-editor.org/info/rfc7089>.
+   [RFC8631]  Wilde, E., "Link Relation Types for Web Services",
+              RFC 8631, DOI 10.17487/RFC8631, July 2019,
+              <https://www.rfc-editor.org/info/rfc8631>.
 
    [RFC8126]  Cotton, M., Leiba, B., and T. Narten, "Guidelines
               for Writing an IANA Considerations Section in RFCs",
               BCP 26, RFC 8126, DOI 10.17487/RFC8126, June 2017,
               <https://www.rfc-editor.org/info/rfc8126>.
-
-   [RFC8615]  Nottingham, M., "Well-Known Uniform Resource
-              Identifiers (URIs)", RFC 8615,
-              DOI 10.17487/RFC8615, May 2019,
-              <https://www.rfc-editor.org/info/rfc8615>.
 
    [RFC9421]  Backman, A., Ed., Richer, J., Ed., and M. Sporny,
               "HTTP Message Signatures", RFC 9421,
@@ -1851,9 +1875,10 @@ Appendix B.  Design Decisions
    *  Some failures are retryable without a specific delay
       recommendation ("retryable": true without "retryAfter").
 
-   *  Some APIs may want to convey "retryAfter" for rate-limiting
-      purposes even on non-retryable errors (though this spec
-      forbids it, the explicit boolean prevents ambiguity).
+   *  Some APIs may want to convey "retryAfter" for general backoff
+      purposes even on non-retryable errors (Section 3.7 allows
+      this in exceptional cases); the explicit boolean prevents
+      ambiguity about whether a retry is advised.
 
    B.4.  Why "processingStage" Is a String, Not an Enum?
 
@@ -1974,7 +1999,7 @@ Appendix E.  OpenAPI Integration
              per draft-ratnawat-httpapi-async-problem-details.
            allOf:
              - $ref: '#/components/schemas/ProblemDetails'
-             - $ref: 'urn:ietf:params:json-schema:async-job-problem-details'
+             - $ref: 'https://example.com/schemas/async-job-problem-details'
 
      paths:
        /api/v1/jobs/{jobId}:
@@ -2004,7 +2029,7 @@ Appendix F.  Interoperability Considerations
 
    F.2.  Handling Unknown Extension Members
 
-   Per [RFC9457] Section 3.1, consumers MUST ignore extension
+   Per [RFC9457] Section 3.2, consumers MUST ignore extension
    members they do not understand.  This ensures forward
    compatibility: future revisions of this document may define
    additional members without breaking existing clients.

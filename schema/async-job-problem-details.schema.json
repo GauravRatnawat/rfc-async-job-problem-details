@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ietf:params:json-schema:async-job-problem-details",
+  "$id": "https://example.com/schemas/async-job-problem-details",
   "title": "Async Job Problem Details Extensions",
   "description": "Extension members for RFC 9457 Problem Details objects that describe asynchronous job outcomes. See draft-ratnawat-httpapi-async-problem-details-00.",
   "type": "object",
@@ -83,14 +83,6 @@
         },
         "additionalProperties": true
       }
-    }
-  },
-  "dependentSchemas": {
-    "retryAfter": {
-      "properties": {
-        "retryable": { "const": true }
-      },
-      "required": ["retryable"]
     }
   },
   "additionalProperties": true

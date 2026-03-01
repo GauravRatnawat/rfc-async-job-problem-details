@@ -24,3 +24,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Internal review and adoption strategy docs
+review/
+adoption/
+draft/SUBMISSION_GUIDE.md

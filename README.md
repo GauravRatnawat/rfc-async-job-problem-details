@@ -50,7 +50,7 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
   "title": "Document Rendering Failed",
   "status": 500,
   "detail": "Template 'invoice-v2' contains an unclosed element at line 87",
-  "instance": "/api/v1/documents/generate",
+  "instance": "/api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000",
   "jobId": "550e8400-e29b-41d4-a716-446655440000",
   "jobStatus": "FAILED",
   "submittedAt": "2026-02-26T10:00:00Z",

@@ -1,0 +1,2526 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc [
+  <!ENTITY nbsp "&#160;">
+  <!ENTITY zwsp "&#8203;">
+  <!ENTITY nbhy "&#8209;">
+  <!ENTITY wj "&#8288;">
+]>
+
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     ipr="trust200902"
+     docName="draft-ratnawat-httpapi-async-problem-details-00"
+     category="std"
+     consensus="true"
+     submissionType="IETF"
+     version="3">
+
+  <front>
+    <title abbrev="Async Job Problem Details">Problem Details for Asynchronous Job Failures</title>
+
+    <seriesInfo name="Internet-Draft" value="draft-ratnawat-httpapi-async-problem-details-00"/>
+
+    <author fullname="Gaurav Ratnawat" initials="G." surname="Ratnawat">
+      <organization>IMTF</organization>
+      <address>
+        <email>gaurav.ratnawat@imtf.com</email>
+      </address>
+    </author>
+
+    <date year="2026" month="February" day="26"/>
+
+    <area>art</area>
+    <workgroup>httpapi</workgroup>
+
+    <keyword>problem details</keyword>
+    <keyword>asynchronous</keyword>
+    <keyword>async job</keyword>
+    <keyword>RFC 9457</keyword>
+    <keyword>HTTP API</keyword>
+
+    <abstract>
+      <t>HTTP APIs that process work asynchronously need a standard way to
+      report job failures.  "Problem Details for HTTP APIs" (RFC 9457)
+      provides the envelope; this document defines extension members
+      that fill it with asynchronous-job-specific context.</t>
+
+      <t>Eight extension members are specified: "jobId", "jobStatus",
+      "submittedAt", "completedAt", "retryable", "retryAfter",
+      "processingStage", and "correlationId".  A ninth member,
+      "results", supports batch operations.  Together they let a
+      server describe which job failed, when, at what pipeline stage,
+      and whether a retry is advisable -- in a single, machine-readable
+      JSON (RFC 8259) object that works equally well in an HTTP response
+      body, a message-broker payload, or a webhook callback.</t>
+
+      <t>Although the primary motivation is structured error reporting
+      for failed jobs, the extension members are equally useful for
+      communicating successful job outcomes (e.g., a COMPLETED status
+      with timing information).</t>
+
+      <t>This document does NOT redefine how to submit, poll, or cancel
+      asynchronous jobs; those mechanics are already covered by
+      "HTTP Semantics" (RFC 9110) (202 Accepted), "Prefer Header for
+      HTTP" (RFC 7240) (respond-async), and emerging IETF work on
+      long-running operations.  Instead, it focuses exclusively on the
+      structured reporting gap that remains after a job reaches a
+      terminal state.</t>
+    </abstract>
+  </front>
+
+  <middle>
+    <!-- ============================================================ -->
+    <!--  1. Introduction                                              -->
+    <!-- ============================================================ -->
+    <section anchor="introduction">
+      <name>Introduction</name>
+
+      <t>Asynchronous job processing is a pervasive pattern in HTTP APIs.
+      When a server cannot fulfil a request within a single
+      request-response cycle, it accepts the work, processes it in the
+      background, and reports the outcome later.</t>
+
+      <t>The IETF has standardized the mechanics of this pattern well:</t>
+
+      <ul>
+        <li><xref target="RFC9110"/> Section 15.3.3 defines the "202 Accepted" status
+        code for requests accepted for processing.</li>
+
+        <li><xref target="RFC7240"/> Section 4.1 defines the "respond-async" preference
+        token that lets clients opt into asynchronous handling.</li>
+
+        <li><xref target="RFC8288"/> defines link relations that can point to status
+        polling resources.</li>
+      </ul>
+
+      <t>What has NOT been standardized is the structure of error reports
+      when asynchronous jobs fail.</t>
+
+      <t><xref target="RFC9457"/> provides a general-purpose envelope for HTTP API errors
+      ("Problem Details"), including the ability to define extension
+      members for domain-specific context.  However, no specification
+      defines reusable extension members for the asynchronous job
+      domain -- leaving every API to invent its own.</t>
+
+      <t>This document defines exactly those extension members.</t>
+
+      <t>The design principle is transport independence: the same Problem
+      Details object -- with the same extension members -- can appear in
+      an HTTP response, a Kafka message, a webhook POST body, or a
+      Server-Sent Event.  This is critical because asynchronous job
+      results often travel through non-HTTP transports where HTTP
+      headers like "Retry-After" are unavailable.</t>
+
+      <section anchor="not">
+        <name>What This Document Is NOT</name>
+
+        <t>To avoid duplicating existing and emerging IETF work, this
+        document explicitly does NOT define:</t>
+
+        <ul>
+          <li>How to submit an asynchronous job.  Use POST with
+          "Prefer: respond-async" <xref target="RFC7240"/> and "202 Accepted"
+          <xref target="RFC9110"/>.</li>
+
+          <li>How to poll for job status.  Use the URI from the "Location"
+          header of the 202 response, or a link relation pointing to
+          the job status resource <xref target="RFC8288"/>.</li>
+
+          <li>How to cancel a running job.  This is operation-specific.</li>
+
+          <li>Idempotency semantics for job submission.  See
+          <xref target="I-D.ietf-httpapi-idempotency-key-header"/>.</li>
+
+          <li>Rate-limiting headers for status polling.  See
+          <xref target="I-D.ietf-httpapi-ratelimit-headers"/> and <xref target="RFC6585"/> (429).</li>
+
+          <li>A new media type.  This document uses "application/problem+json"
+          as defined by <xref target="RFC9457"/>.</li>
+        </ul>
+
+        <t>This document fills a single, specific gap: structured error
+        context for async job failures, expressed as <xref target="RFC9457"/> extension
+        members.</t>
+      </section>
+
+      <section anchor="relationship">
+        <name>Relationship to Existing Standards</name>
+
+        <t>The following table maps each aspect of the asynchronous job
+        lifecycle to the standard that covers it, and identifies where
+        this document contributes.</t>
+
+        <table anchor="tbl-relationship">
+          <name>Relationship to Existing Standards</name>
+          <thead>
+            <tr>
+              <th>Lifecycle Aspect</th>
+              <th>Covered By</th>
+              <th>This Document</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Accepting a job</td>
+              <td>RFC 9110 (202)</td>
+              <td>No (uses as-is)</td>
+            </tr>
+            <tr>
+              <td>Client async preference</td>
+              <td>RFC 7240</td>
+              <td>No (uses as-is)</td>
+            </tr>
+            <tr>
+              <td>Status polling link</td>
+              <td>RFC 8288</td>
+              <td>No (uses as-is)</td>
+            </tr>
+            <tr>
+              <td>Idempotent submission</td>
+              <td>I-D.ietf-httpapi-idempotency-key</td>
+              <td>No (uses as-is)</td>
+            </tr>
+            <tr>
+              <td>Rate-limited polling</td>
+              <td>I-D.ietf-httpapi-ratelimit-headers</td>
+              <td>No (uses as-is)</td>
+            </tr>
+            <tr>
+              <td>Error envelope format</td>
+              <td>RFC 9457</td>
+              <td>No (extends)</td>
+            </tr>
+            <tr>
+              <td>Job failure context</td>
+              <td>(none)</td>
+              <td>YES — defines extension members</td>
+            </tr>
+            <tr>
+              <td>Transport-independent retry semantics</td>
+              <td>(none)</td>
+              <td>YES — defines retryable, retryAfter</td>
+            </tr>
+            <tr>
+              <td>Batch partial failure structure</td>
+              <td>(none)</td>
+              <td>YES — defines results array</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="conventions">
+        <name>Notational Conventions</name>
+
+        <t>The key words "<bcp14>MUST</bcp14>", "<bcp14>MUST NOT</bcp14>",
+        "<bcp14>REQUIRED</bcp14>", "<bcp14>SHALL</bcp14>",
+        "<bcp14>SHALL NOT</bcp14>", "<bcp14>SHOULD</bcp14>",
+        "<bcp14>SHOULD NOT</bcp14>", "<bcp14>RECOMMENDED</bcp14>",
+        "<bcp14>NOT RECOMMENDED</bcp14>", "<bcp14>MAY</bcp14>", and
+        "<bcp14>OPTIONAL</bcp14>" in this document are to be interpreted as
+        described in BCP 14 <xref target="RFC2119"/> <xref target="RFC8174"/>
+        when, and only when, they appear in all capitals, as shown here.</t>
+
+        <t>This document uses the terms "extension member", "problem type",
+        and "problem details object" as defined in <xref target="RFC9457"/>.</t>
+
+        <t>JSON <xref target="RFC8259"/> is used for all examples and the normative schema.
+        Whitespace in JSON examples is insignificant and is included for
+        readability only.</t>
+      </section>
+
+      <section anchor="terminology">
+        <name>Terminology</name>
+
+        <dl>
+          <dt>job:</dt>
+          <dd>A unit of work that a server accepts for asynchronous
+          processing in response to a client request.</dd>
+
+          <dt>job status resource:</dt>
+          <dd>An HTTP resource whose representation
+          describes the current state of a job.  Typically the target
+          of the "Location" header returned in a "202 Accepted" response.</dd>
+
+          <dt>terminal state:</dt>
+          <dd>A job status from which no further transitions
+          are possible (COMPLETED, FAILED, CANCELLED, TIMED_OUT,
+          COMPLETED_WITH_ERRORS).</dd>
+
+          <dt>non-terminal state:</dt>
+          <dd>A job status from which the job may still
+          transition (ACCEPTED, PROCESSING, and any server-defined
+          intermediate states).</dd>
+
+          <dt>originating request:</dt>
+          <dd>The HTTP request that caused the job to be created.</dd>
+        </dl>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  2. Problem Statement                                         -->
+    <!-- ============================================================ -->
+    <section anchor="problem-statement">
+      <name>Problem Statement</name>
+
+      <section anchor="gap">
+        <name>The Gap in RFC 9457</name>
+
+        <t><xref target="RFC9457"/> defines five standard members for problem details
+        objects: "type", "title", "status", "detail", and "instance".
+        It explicitly allows extension members for domain-specific data
+        (Section 3.2 of <xref target="RFC9457"/>).</t>
+
+        <t>However, <xref target="RFC9457"/> does not define any reusable extension members.
+        Each API defines its own, leading to fragmentation.  For the
+        asynchronous job domain -- one of the most common API patterns --
+        this fragmentation is particularly costly because:</t>
+
+        <ul>
+          <li>Monitoring tools cannot parse job failure context across APIs.</li>
+          <li>Client libraries must handle bespoke error shapes per service.</li>
+          <li>API designers spend time reinventing the same fields.</li>
+        </ul>
+      </section>
+
+      <section anchor="transport-independence">
+        <name>The Transport-Independence Problem</name>
+
+        <t>A key challenge specific to asynchronous jobs is that the failure
+        report may not travel over HTTP at all.  Consider:</t>
+
+        <ul>
+          <li>A PDF generation service publishes job results to a Kafka topic.
+          There are no HTTP headers; the entire context must be in the
+          message payload.</li>
+
+          <li>A webhook delivers the result via a POST callback.  The
+          "Retry-After" header applies to the webhook delivery, not to
+          the original job.</li>
+
+          <li>A Server-Sent Event stream pushes status updates.  The event
+          data field carries JSON; HTTP headers are from the SSE
+          connection, not the job.</li>
+        </ul>
+
+        <t>The "Retry-After" header field (<xref target="RFC9110"/> Section 10.2.3) is
+        transport-bound: it only exists in HTTP responses.  When a job
+        failure must be communicated via Kafka, SSE, gRPC, or a webhook,
+        the retry signal is lost.</t>
+
+        <t>This document solves this by defining "retryable" and "retryAfter"
+        as JSON members inside the Problem Details object -- making them
+        available regardless of transport.</t>
+      </section>
+
+      <section anchor="survey">
+        <name>Survey of Current Practice</name>
+
+        <t>The following table surveys how four major platforms represent
+        async job failures today.  No two use the same field names.</t>
+
+        <table anchor="tbl-survey">
+          <name>Async Job Error Reporting — Industry Survey</name>
+          <thead>
+            <tr>
+              <th>Concept</th>
+              <th>AWS Step Functions</th>
+              <th>Azure LRO</th>
+              <th>Google AIP-151</th>
+              <th>Stripe</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Job identifier</td>
+              <td>executionArn</td>
+              <td>id</td>
+              <td>name</td>
+              <td>id</td>
+            </tr>
+            <tr>
+              <td>Status field</td>
+              <td>status</td>
+              <td>status</td>
+              <td>done + error</td>
+              <td>status</td>
+            </tr>
+            <tr>
+              <td>Status values</td>
+              <td>RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED</td>
+              <td>Succeeded, Failed, Cancelled</td>
+              <td>done: true/false</td>
+              <td>pending, succeeded, failed</td>
+            </tr>
+            <tr>
+              <td>Submission time</td>
+              <td>startDate</td>
+              <td>createdDateTime</td>
+              <td>metadata.createTime</td>
+              <td>created</td>
+            </tr>
+            <tr>
+              <td>Completion time</td>
+              <td>stopDate</td>
+              <td>lastUpdatedDateTime</td>
+              <td>metadata.endTime</td>
+              <td>N/A</td>
+            </tr>
+            <tr>
+              <td>Error structure</td>
+              <td>error, cause (strings)</td>
+              <td>error: {code, message}</td>
+              <td>google.rpc.Status</td>
+              <td>error: {type, message}</td>
+            </tr>
+            <tr>
+              <td>Retry guidance</td>
+              <td>N/A</td>
+              <td>retryAfter</td>
+              <td>N/A</td>
+              <td>N/A</td>
+            </tr>
+            <tr>
+              <td>Failure stage</td>
+              <td>N/A</td>
+              <td>N/A</td>
+              <td>N/A</td>
+              <td>N/A</td>
+            </tr>
+            <tr>
+              <td>Error format</td>
+              <td>Custom JSON</td>
+              <td>Custom JSON</td>
+              <td>google.rpc.Status</td>
+              <td>Custom JSON</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <t>Key observations:</t>
+
+        <ul>
+          <li>Every platform invents its own field names, status values, and
+          error structures.</li>
+
+          <li>None builds on <xref target="RFC9457"/>, despite it being the IETF standard
+          for HTTP API errors.</li>
+
+          <li>Retry guidance is almost never structured (only Azure's LRO
+          pattern includes "retryAfter", and only in the HTTP header).</li>
+
+          <li>Processing stage information -- which pipeline step failed --
+          is universally absent, despite being essential for debugging
+          multi-step workflows (e.g., validate → render → convert →
+          store).</li>
+
+          <li>Google's AIP-151 (Long-Running Operations) comes closest to a
+          standard but is Google-specific and uses gRPC/Protobuf, not
+          <xref target="RFC9457"/>.</li>
+        </ul>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  3. Extension Members                                         -->
+    <!-- ============================================================ -->
+    <section anchor="extension-members">
+      <name>Extension Members</name>
+
+      <section anchor="ext-overview">
+        <name>Overview</name>
+
+        <t>This section defines eight extension members for <xref target="RFC9457"/> problem
+        details objects.  They are organized into four groups:</t>
+
+        <dl>
+          <dt>Identification:</dt>
+          <dd>"jobId" (<xref target="ext-jobid"/>) and "correlationId" (<xref target="ext-correlationid"/>).</dd>
+
+          <dt>State and Timing:</dt>
+          <dd>"jobStatus" (<xref target="ext-jobstatus"/>), "submittedAt" (<xref target="ext-submittedat"/>), and
+          "completedAt" (<xref target="ext-completedat"/>).</dd>
+
+          <dt>Retry Guidance:</dt>
+          <dd>"retryable" (<xref target="ext-retryable"/>) and "retryAfter" (<xref target="ext-retryafter"/>).</dd>
+
+          <dt>Diagnostics:</dt>
+          <dd>"processingStage" (<xref target="ext-processingstage"/>).</dd>
+        </dl>
+
+        <t>All extension members are <bcp14>OPTIONAL</bcp14> in any given problem details
+        object.  A server <bcp14>MAY</bcp14> include any subset of them.  A client
+        <bcp14>MUST NOT</bcp14> assume any particular member is present and <bcp14>MUST</bcp14>
+        gracefully handle its absence.</t>
+
+        <t>When present, these members <bcp14>MUST</bcp14> appear at the top level of the
+        problem details JSON object, alongside the standard <xref target="RFC9457"/>
+        members ("type", "title", "status", "detail", "instance").</t>
+
+        <t>Although defined as <xref target="RFC9457"/> extension members, these JSON member
+        names and semantics <bcp14>MAY</bcp14> also be used in non-problem-details JSON
+        objects (e.g., successful job status responses).  When used
+        outside a problem details context, the <xref target="RFC9457"/> standard members
+        ("type", "title", "status", "detail", "instance") are not
+        required.  However, when reporting failures,
+        "application/problem+json" <bcp14>SHOULD</bcp14> be used per <xref target="RFC9457"/>.</t>
+
+        <t>In all non-HTTP transport contexts (message brokers, webhooks,
+        SSE), the "status" member represents the HTTP status code that
+        WOULD have been used if the failure had been reported in a
+        synchronous HTTP response.  It is not the HTTP status code of
+        the delivery mechanism.</t>
+
+        <section anchor="conformance">
+          <name>Conformance Levels</name>
+
+          <t>To provide interoperability guidance while preserving flexibility,
+          this document defines two conformance levels:</t>
+
+          <dl>
+            <dt>Basic Conformance:</dt>
+            <dd>A problem details object that includes at
+            least one extension member from this specification.  This is
+            the minimum bar: any server that includes "jobId",
+            "processingStage", or any other member defined herein is
+            using this specification.</dd>
+
+            <dt>Full Conformance:</dt>
+            <dd>A problem details object that includes
+            "jobId", "jobStatus", and "submittedAt".  These three members
+            together provide sufficient context to uniquely identify a
+            job, know its state, and establish when it was accepted.
+            Servers that aim for interoperability across monitoring tools
+            and client libraries <bcp14>SHOULD</bcp14> target Full Conformance.</dd>
+          </dl>
+
+          <t>Individual member definitions below use "<bcp14>RECOMMENDED</bcp14>" to
+          indicate members that <bcp14>SHOULD</bcp14> be present for Full Conformance.
+          This is not a contradiction with the <bcp14>OPTIONAL</bcp14> preamble above:
+          all members remain <bcp14>OPTIONAL</bcp14> in the <xref target="RFC9457"/> sense, but Full
+          Conformance requires a specific subset.</t>
+        </section>
+      </section>
+
+      <section anchor="ext-jobid">
+        <name>"jobId"</name>
+
+        <t>A string that uniquely identifies the asynchronous job.</t>
+
+        <ul>
+          <li>Type: string</li>
+
+          <li>Constraints: The server <bcp14>MUST</bcp14> assign this value when the job is
+          accepted.  The value <bcp14>SHOULD</bcp14> be a UUID <xref target="RFC9562"/> or another
+          globally unique identifier.  The client <bcp14>MUST</bcp14> treat it as an
+          opaque string and <bcp14>MUST NOT</bcp14> parse or interpret its structure.</li>
+
+          <li>When to include: <bcp14>RECOMMENDED</bcp14> whenever reporting an async job
+          outcome.</li>
+
+          <li>Relationship: If the job was submitted via HTTP and the server
+          returned a "Location" header pointing to a job status resource,
+          the "jobId" value <bcp14>SHOULD</bcp14> match the identifier embedded in that
+          URI.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"jobId": "550e8400-e29b-41d4-a716-446655440000"</sourcecode>
+      </section>
+
+      <section anchor="ext-jobstatus">
+        <name>"jobStatus"</name>
+
+        <t>A string indicating the current state of the job.  Registered
+        values are defined in <xref target="status-registry"/>.</t>
+
+        <ul>
+          <li>Type: string (case-sensitive, enumerated)</li>
+
+          <li>Constraints: Consumers <bcp14>MUST</bcp14> perform case-sensitive string
+          comparison when matching "jobStatus" values against the
+          registered values in <xref target="status-registry"/>.</li>
+
+          <li>When to include: <bcp14>RECOMMENDED</bcp14> whenever reporting an async job
+          outcome.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"jobStatus": "FAILED"</sourcecode>
+      </section>
+
+      <section anchor="ext-submittedat">
+        <name>"submittedAt"</name>
+
+        <t>An <xref target="RFC3339"/> timestamp indicating when the server accepted the
+        job for processing.</t>
+
+        <ul>
+          <li>Type: string (date-time per <xref target="RFC3339"/>)</li>
+
+          <li>Constraints: <bcp14>MUST</bcp14> be in UTC (indicated by the "Z" suffix) to
+          avoid timezone ambiguity in distributed systems.</li>
+
+          <li>When to include: <bcp14>RECOMMENDED</bcp14> whenever reporting an async job
+          outcome.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"submittedAt": "2026-02-26T10:00:00Z"</sourcecode>
+      </section>
+
+      <section anchor="ext-completedat">
+        <name>"completedAt"</name>
+
+        <t>An <xref target="RFC3339"/> timestamp indicating when the job reached a terminal
+        state.</t>
+
+        <ul>
+          <li>Type: string (date-time per <xref target="RFC3339"/>)</li>
+
+          <li>Constraints: <bcp14>MUST</bcp14> be in UTC.  <bcp14>MUST NOT</bcp14> be present when the
+          job is in a non-terminal state.  When the problem details
+          object is published to a message broker or delivered via
+          webhook, the producer <bcp14>MUST</bcp14> ensure that "completedAt" is
+          absent if "jobStatus" is a non-terminal value at the time
+          of publication.  Consumers that encounter this inconsistency
+          <bcp14>SHOULD</bcp14> log a warning and ignore the "completedAt" value.</li>
+
+          <li>When to include: <bcp14>RECOMMENDED</bcp14> when the job has reached a
+          terminal state.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"completedAt": "2026-02-26T10:00:05Z"</sourcecode>
+      </section>
+
+      <section anchor="ext-retryable">
+        <name>"retryable"</name>
+
+        <t>A boolean indicating whether the client <bcp14>SHOULD</bcp14> retry the job
+        submission with the same input.</t>
+
+        <ul>
+          <li>Type: boolean</li>
+
+          <li>Default: If absent, the client <bcp14>SHOULD</bcp14> assume "false" (not
+          retryable).</li>
+
+          <li><t>Semantics:</t>
+            <ul>
+              <li>"true": The failure is likely transient (e.g., a downstream
+              dependency was temporarily unavailable).  The same request
+              <bcp14>MAY</bcp14> succeed if resubmitted.</li>
+
+              <li>"false": The failure is deterministic (e.g., invalid input,
+              missing template).  Retrying with the same input will
+              produce the same failure.</li>
+            </ul>
+          </li>
+
+          <li>Relationship to "Retry-After" header: When the failure is
+          reported in an HTTP response, the server <bcp14>SHOULD</bcp14> also include
+          the "Retry-After" header field <xref target="RFC9110"/> with a value
+          consistent with the "retryAfter" extension member.  When the
+          failure is reported over a non-HTTP transport (message broker,
+          webhook, SSE), the "retryAfter" member is the only mechanism
+          available.  This is the primary motivation for expressing
+          retry semantics as a JSON member rather than relying solely
+          on the HTTP header.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"retryable": true</sourcecode>
+      </section>
+
+      <section anchor="ext-retryafter">
+        <name>"retryAfter"</name>
+
+        <t>A non-negative integer indicating the number of seconds the
+        client <bcp14>SHOULD</bcp14> wait before retrying the job submission.</t>
+
+        <ul>
+          <li>Type: integer (&gt;= 0)</li>
+
+          <li><t>Constraints:</t>
+            <ul>
+              <li><bcp14>SHOULD NOT</bcp14> be present when "retryable" is absent or "false".
+              In exceptional cases, a server <bcp14>MAY</bcp14> include "retryAfter"
+              without "retryable" to signal a general backoff interval
+              (e.g., the server is under load and wants all clients to
+              slow down), but clients <bcp14>SHOULD NOT</bcp14> interpret this as
+              permission to retry a deterministically failed job.</li>
+
+              <li><bcp14>SHOULD</bcp14> be present when "retryable" is "true".</li>
+
+              <li>A value of 0 is syntactically valid but clients <bcp14>MUST NOT</bcp14>
+              interpret it as "retry immediately"; see <xref target="sec-retry-amplification"/> for
+              minimum backoff requirements.</li>
+            </ul>
+          </li>
+
+          <li>Semantics: Equivalent to the "Retry-After" header field
+          (<xref target="RFC9110"/> Section 10.2.3) expressed as seconds, but embedded
+          in the JSON body for transport independence.</li>
+
+          <li>Temporal reference: The "retryAfter" value represents the
+          minimum number of seconds to wait before retrying, measured
+          from the value of "completedAt" (if present).  When
+          "completedAt" is absent, the value is measured from the time
+          the consumer receives the problem details object.
+          For non-HTTP transports where delivery delay is possible
+          (e.g., a lagging Kafka consumer), consumers <bcp14>SHOULD</bcp14> compute
+          the effective wait time as: retryAfter - (now - completedAt).
+          If the result is zero or negative, the consumer <bcp14>MAY</bcp14> retry
+          immediately (subject to the minimum backoff floor in
+          <xref target="sec-retry-amplification"/>).</li>
+
+          <li>Client-side safety: Regardless of the value of "retryAfter",
+          clients <bcp14>MUST</bcp14> enforce a minimum backoff floor (e.g., 1 second)
+          to prevent tight retry loops in case of a misconfigured or
+          malicious server.  Clients <bcp14>SHOULD</bcp14> also enforce a maximum
+          retry delay (e.g., 3600 seconds) beyond which the
+          "retryAfter" value is treated as indicating that a retry is
+          impractical.  See <xref target="sec-retry-amplification"/>.</li>
+
+          <li>Relationship to draft-ietf-httpapi-ratelimit-headers: The
+          RateLimit header fields defined in that draft apply to the
+          HTTP request rate for the polling endpoint.  The "retryAfter"
+          extension member defined here applies to the job resubmission
+          interval.  These are distinct concerns: one governs how often
+          you ask "is it done?", the other governs how soon you should
+          try the work again.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"retryAfter": 30</sourcecode>
+      </section>
+
+      <section anchor="ext-processingstage">
+        <name>"processingStage"</name>
+
+        <t>A string identifying the stage in the server's processing
+        pipeline at which the job failed or completed.</t>
+
+        <ul>
+          <li>Type: string</li>
+
+          <li>Constraints: The value is server-defined.  Servers that use
+          this member <bcp14>SHOULD</bcp14> document the possible values and their
+          meanings in their API specification.</li>
+
+          <li>When to include: <bcp14>OPTIONAL</bcp14>.  <bcp14>RECOMMENDED</bcp14> when the server has a
+          multi-step processing pipeline and the failure can be
+          attributed to a specific step.</li>
+
+          <li>Registry: This document does not create an IANA registry for
+          processing stage values.  Stage names are inherently
+          API-specific because processing pipelines vary too widely
+          across domains.  The interoperability benefit of this member
+          comes from its structured presence (enabling tools to extract
+          and display the stage), not from standardized values.
+          Servers <bcp14>SHOULD</bcp14> use the stage names from <xref target="tbl-stages"/> when
+          applicable, and <bcp14>MAY</bcp14> define additional names for domain-specific
+          stages.</li>
+        </ul>
+
+        <t>Recommended stage names (servers <bcp14>MAY</bcp14> define others):</t>
+
+        <table anchor="tbl-stages">
+          <name>Recommended Processing Stage Names</name>
+          <thead>
+            <tr>
+              <th>Stage</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>validation</td>
+              <td>Input validation against schema or business rules failed.</td>
+            </tr>
+            <tr>
+              <td>authorization</td>
+              <td>The job's security context was insufficient for the requested operation.</td>
+            </tr>
+            <tr>
+              <td>queuing</td>
+              <td>The job could not be placed onto the processing queue (broker unavailable, queue full).</td>
+            </tr>
+            <tr>
+              <td>processing</td>
+              <td>General processing failure (use more specific stages when possible).</td>
+            </tr>
+            <tr>
+              <td>rendering</td>
+              <td>Template or document rendering failed.</td>
+            </tr>
+            <tr>
+              <td>conversion</td>
+              <td>Format conversion failed (e.g., HTML to PDF, image transcoding).</td>
+            </tr>
+            <tr>
+              <td>storage</td>
+              <td>The result could not be persisted (disk, object store, database).</td>
+            </tr>
+            <tr>
+              <td>delivery</td>
+              <td>The result could not be delivered to the callback URL or output channel.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <t>Example:</t>
+        <sourcecode type="json">"processingStage": "rendering"</sourcecode>
+      </section>
+
+      <section anchor="ext-correlationid">
+        <name>"correlationId"</name>
+
+        <t>A string containing a client-supplied identifier from the
+        originating request, used for distributed tracing.</t>
+
+        <ul>
+          <li>Type: string</li>
+
+          <li>Constraints: The value is client-supplied and <bcp14>MUST</bcp14> be treated
+          as untrusted (see <xref target="sec-correlation-injection"/>).  Servers <bcp14>SHOULD</bcp14> enforce a
+          maximum length (e.g., 256 characters) and reject or truncate
+          values that exceed it.  See <xref target="sec-correlation-injection"/>.</li>
+
+          <li>When to include: <bcp14>RECOMMENDED</bcp14> when the originating request
+          included a correlation identifier (e.g., via the
+          "X-Correlation-ID" header, the W3C "traceparent" header
+          <xref target="W3C.TRACE-CONTEXT"/>, or a field in the request body).</li>
+
+          <li>Relationship to W3C Trace Context: If the server supports
+          W3C Trace Context <xref target="W3C.TRACE-CONTEXT"/>, the "correlationId"
+          <bcp14>SHOULD</bcp14> carry the trace-id portion of the "traceparent" header.
+          This allows the problem details object to be correlated with
+          distributed traces without requiring the consumer to have
+          access to the originating HTTP headers.</li>
+        </ul>
+
+        <t>Example:</t>
+        <sourcecode type="json">"correlationId": "4bf92f3577b34da6a3ce929d0e0e4736"</sourcecode>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  4. Job Status Registry                                       -->
+    <!-- ============================================================ -->
+    <section anchor="status-registry">
+      <name>Job Status Registry</name>
+
+      <section anchor="initial-values">
+        <name>Initial Values</name>
+
+        <table anchor="tbl-status-values">
+          <name>Initial Job Status Values</name>
+          <thead>
+            <tr>
+              <th>Status Value</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ACCEPTED</td>
+              <td>The job has been accepted but processing has not yet started.</td>
+            </tr>
+            <tr>
+              <td>PROCESSING</td>
+              <td>The job is actively being processed.</td>
+            </tr>
+            <tr>
+              <td>COMPLETED</td>
+              <td>The job finished successfully; the result is available.</td>
+            </tr>
+            <tr>
+              <td>FAILED</td>
+              <td>The job encountered an error.  The "detail" member SHOULD describe the failure.</td>
+            </tr>
+            <tr>
+              <td>CANCELLED</td>
+              <td>The job was cancelled before completion.</td>
+            </tr>
+            <tr>
+              <td>TIMED_OUT</td>
+              <td>The job exceeded the server's maximum allowed processing duration.</td>
+            </tr>
+            <tr>
+              <td>COMPLETED_WITH_ERRORS</td>
+              <td>(Batch only) Some items succeeded and some failed.  See <xref target="batch"/>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="terminal-states">
+        <name>Terminal vs. Non-Terminal States</name>
+
+        <t>Terminal states: COMPLETED, FAILED, CANCELLED, TIMED_OUT,
+        COMPLETED_WITH_ERRORS.  Once a job reaches a terminal state,
+        its "jobStatus" <bcp14>MUST NOT</bcp14> change.</t>
+
+        <t>Non-terminal states: ACCEPTED, PROCESSING.</t>
+      </section>
+
+      <section anchor="extensibility">
+        <name>Extensibility</name>
+
+        <t>Servers <bcp14>MAY</bcp14> define additional status values for their domain
+        (e.g., "VALIDATING", "RENDERING", "AWAITING_APPROVAL").</t>
+
+        <t>To reduce the risk of interoperability issues from typos or
+        inconsistent naming, server-defined status values <bcp14>SHOULD</bcp14> use
+        UPPER_SNAKE_CASE to match the registered values, and <bcp14>SHOULD</bcp14>
+        be documented in the API specification.</t>
+
+        <t>Clients that encounter an unrecognized status value <bcp14>SHOULD</bcp14>
+        treat it as non-terminal (equivalent to "PROCESSING") unless
+        the value is documented by the API as terminal.</t>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  5. Transport Contexts                                        -->
+    <!-- ============================================================ -->
+    <section anchor="transport-contexts">
+      <name>Transport Contexts</name>
+
+      <t>A core design goal of this specification is that the extension
+      members work identically regardless of how the problem details
+      object reaches the consumer.  This section provides guidance
+      for four common transports.</t>
+
+      <section anchor="http-responses">
+        <name>HTTP Response Bodies</name>
+
+        <t>This is the primary context anticipated by <xref target="RFC9457"/>.  The
+        problem details object appears in the body of an HTTP response
+        with Content-Type "application/problem+json".</t>
+
+        <t>When used in HTTP responses, servers <bcp14>SHOULD</bcp14> also set:</t>
+
+        <ul>
+          <li>The "Retry-After" header field to match the "retryAfter"
+          member (if present), for compatibility with clients that
+          do not parse the body.</li>
+
+          <li>The "status" member to match the HTTP status code of the
+          response, per <xref target="RFC9457"/> Section 3.1.</li>
+        </ul>
+
+        <t>Example context: A client polls a job status resource and
+        receives a failure report.</t>
+      </section>
+
+      <section anchor="message-brokers">
+        <name>Message Broker Payloads</name>
+
+        <t>When a job result is published to a message broker (e.g., Apache
+        Kafka, RabbitMQ, Amazon SQS), the problem details object is
+        serialized as the message value.</t>
+
+        <t>In this context:</t>
+
+        <ul>
+          <li>HTTP headers are unavailable.  The "retryAfter" member is
+          the only mechanism for conveying retry guidance.</li>
+
+          <li>The "status" member represents the HTTP status code that
+          WOULD have been used if the failure had been reported
+          synchronously.</li>
+
+          <li>The broker message key <bcp14>SHOULD</bcp14> be the "jobId" value, enabling
+          consumers to partition and deduplicate by job.</li>
+
+          <li>The Content-Type of the message (if the broker supports
+          content-type metadata) <bcp14>SHOULD</bcp14> be "application/problem+json".</li>
+        </ul>
+
+        <t>Example context: A PDF generation service publishes a failure
+        to a Kafka result topic.  The consumer reads the Problem Details
+        object from the message value.</t>
+      </section>
+
+      <section anchor="webhooks">
+        <name>Webhook Callbacks</name>
+
+        <t>When a server delivers a job result by POSTing to a client-supplied
+        callback URL, the request body <bcp14>SHOULD</bcp14> be the problem details object
+        with Content-Type "application/problem+json".</t>
+
+        <t>In this context:</t>
+
+        <ul>
+          <li>The HTTP status code of the webhook POST is about the
+          delivery, not the job.  The "status" member inside the
+          problem details object conveys the job-level status.</li>
+
+          <li>Servers <bcp14>SHOULD</bcp14> sign webhook deliveries using HTTP Message
+          Signatures <xref target="RFC9421"/> to allow recipients to verify authenticity.
+          See <xref target="interaction-signatures"/>.</li>
+
+          <li>The "retryAfter" member applies to job resubmission, NOT to
+          webhook delivery retry.  Webhook delivery retry is a concern
+          of the delivery mechanism, not this specification.</li>
+        </ul>
+      </section>
+
+      <section anchor="sse">
+        <name>Server-Sent Events</name>
+
+        <t>When a server pushes job status updates via Server-Sent Events
+        (SSE) <xref target="W3C.SSE"/>, the problem details object is serialized as
+        the "data" field of an event.</t>
+
+        <t>The "event" field of the SSE <bcp14>SHOULD</bcp14> be "job-failed" (or a
+        similar descriptive type).</t>
+
+        <t>Example:</t>
+        <sourcecode type="">event: job-failed
+data: {"type":"https://api.example.com/problems/rendering-failed",
+data:  "title":"Document Rendering Failed","status":500,
+data:  "jobId":"550e8400","jobStatus":"FAILED",
+data:  "processingStage":"rendering"}</sourcecode>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  6. Interaction with Existing Standards                       -->
+    <!-- ============================================================ -->
+    <section anchor="interaction">
+      <name>Interaction with Existing Standards</name>
+
+      <t>This section documents how the extension members interact with
+      each referenced RFC, to help implementers compose them correctly.</t>
+
+      <section anchor="interaction-9457">
+        <name>RFC 9457 — Problem Details for HTTP APIs</name>
+
+        <t>This document extends <xref target="RFC9457"/> by defining reusable extension
+        members per Section 3.2 of that specification.  All standard
+        <xref target="RFC9457"/> members ("type", "title", "status", "detail",
+        "instance") retain their original semantics.</t>
+
+        <t>Notably:</t>
+
+        <ul>
+          <li>"type" <bcp14>SHOULD</bcp14> be a URI identifying the specific failure type,
+          NOT "about:blank", when async job extension members are
+          present.  This enables consumers to distinguish async job
+          failures from generic HTTP errors.</li>
+
+          <li>"instance" <bcp14>SHOULD</bcp14> identify the specific occurrence of the
+          problem, per <xref target="RFC9457"/> Section 3.1.5.  For async jobs, this
+          is typically the URI of the job status resource (e.g.,
+          "/api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000"),
+          enabling consumers to dereference it for full details.</li>
+
+          <li>"status" represents the HTTP status code that WOULD have been
+          returned if the job had been processed synchronously.</li>
+        </ul>
+      </section>
+
+      <section anchor="interaction-9110">
+        <name>RFC 9110 — HTTP Semantics (202 Accepted)</name>
+
+        <t><xref target="RFC9110"/> Section 15.3.3 defines 202 Accepted as indicating that
+        the request has been accepted for processing but the processing
+        has not been completed.  It notes that there is no facility in
+        HTTP for re-connecting to an asynchronous operation later.</t>
+
+        <t>This document does not change the semantics of 202.  The extension
+        members defined here apply to the failure report, not to the
+        acceptance response.</t>
+      </section>
+
+      <section anchor="interaction-7240">
+        <name>RFC 7240 — Prefer Header (respond-async)</name>
+
+        <t><xref target="RFC7240"/> Section 4.1 defines the "respond-async" preference
+        token.  This document does not change its semantics.</t>
+
+        <t>When a server honors "respond-async" and later the job fails,
+        the failure report (returned from the job status resource or
+        delivered via another transport) <bcp14>SHOULD</bcp14> include the extension
+        members defined in this document.</t>
+
+        <t>Note: The extension members defined here are useful regardless
+        of whether the originating request included "Prefer:
+        respond-async".  A server that always processes requests
+        asynchronously (without requiring the Prefer header) <bcp14>SHOULD</bcp14>
+        still use these extension members when reporting job outcomes.</t>
+      </section>
+
+      <section anchor="interaction-9512">
+        <name>RFC 9512 — YAML Media Type</name>
+
+        <t>If an API documents its async job failure schemas using AsyncAPI
+        <xref target="ASYNCAPI"/> specifications (commonly authored in YAML), the
+        specification file <bcp14>SHOULD</bcp14> be served with Content-Type
+        "application/yaml" per <xref target="RFC9512"/> when exposed via HTTP.</t>
+      </section>
+
+      <section anchor="interaction-8288">
+        <name>RFC 8288 — Web Linking</name>
+
+        <t>Servers that return 202 Accepted <bcp14>SHOULD</bcp14> include a "Link" header
+        with a relation type that points to the job status resource.
+        Servers <bcp14>MAY</bcp14> use the registered "status" relation type
+        <xref target="RFC8631"/> or a URI-based extension relation type as described
+        in Section 2.1.2 of <xref target="RFC8288"/>.</t>
+
+        <t>When a completed or failed job's status response includes a
+        link to the result resource, the server <bcp14>SHOULD</bcp14> use a URI-based
+        extension relation type as described in Section 2.1.2 of
+        <xref target="RFC8288"/> (e.g.,
+        "https://api.example.com/rels/job-result") or an existing
+        registered relation type such as "related" <xref target="IANA.LINK-RELATIONS"/>.
+        Servers <bcp14>MUST NOT</bcp14> use unregistered short-form relation types.</t>
+      </section>
+
+      <section anchor="interaction-signatures">
+        <name>RFC 9421 — HTTP Message Signatures</name>
+
+        <t>When job failure reports are delivered via webhooks, servers <bcp14>MAY</bcp14>
+        sign the webhook request using <xref target="RFC9421"/> to allow the recipient
+        to verify the report's authenticity and integrity.</t>
+
+        <t>When job results are delivered via message brokers, <xref target="RFC9421"/>
+        does not apply (it is HTTP-specific).  Broker-level security
+        mechanisms (e.g., TLS, SASL) <bcp14>SHOULD</bcp14> be used instead.</t>
+      </section>
+
+      <section anchor="interaction-6585">
+        <name>RFC 6585 — Additional HTTP Status Codes (429)</name>
+
+        <t><xref target="RFC6585"/> defines 429 Too Many Requests.  This applies to
+        the job status polling endpoint, NOT to job failure reports.</t>
+
+        <t>If a client polls too frequently, the server <bcp14>MAY</bcp14> return 429 with
+        a "Retry-After" header.  This is distinct from the "retryAfter"
+        extension member, which governs job resubmission timing.</t>
+
+        <t>Implementers <bcp14>MUST NOT</bcp14> confuse these two retry signals:</t>
+
+        <ul>
+          <li>"Retry-After" header on a 429 response: "wait before
+          polling again."</li>
+
+          <li>"retryAfter" extension member in a FAILED job report:
+          "wait before resubmitting the job."</li>
+        </ul>
+      </section>
+
+      <section anchor="interaction-9562">
+        <name>RFC 9562 — UUIDs</name>
+
+        <t>The "jobId" member <bcp14>SHOULD</bcp14> be a UUID per <xref target="RFC9562"/> to ensure
+        global uniqueness and unguessability.  UUIDv7 is <bcp14>RECOMMENDED</bcp14>
+        for new implementations because it embeds a timestamp, enabling
+        natural chronological ordering of jobs.</t>
+      </section>
+
+      <section anchor="interaction-6901">
+        <name>RFC 6901 — JSON Pointer</name>
+
+        <t>When a job fails at the "validation" stage, the "detail" member
+        <bcp14>MAY</bcp14> reference specific input fields using JSON Pointer <xref target="RFC6901"/>
+        syntax (e.g., "Field /templateData/customerName is required").</t>
+
+        <t>For richer validation error reporting, implementers <bcp14>MAY</bcp14> combine
+        these extension members with validation-specific extensions
+        (such as a "violations" array using JSON Pointer field
+        references), but defining such extensions is outside the scope
+        of this document.</t>
+      </section>
+
+      <section anchor="interaction-idempotency">
+        <name>draft-ietf-httpapi-idempotency-key-header</name>
+
+        <t>When a client resubmits a failed job (guided by "retryable":
+        true), it <bcp14>SHOULD</bcp14> include an "Idempotency-Key" header per
+        <xref target="I-D.ietf-httpapi-idempotency-key-header"/> to prevent duplicate
+        processing if the resubmission is received more than once.</t>
+
+        <t>The "jobId" from the failed job <bcp14>SHOULD NOT</bcp14> be reused as the
+        idempotency key, because the retry is a new job submission.</t>
+      </section>
+
+      <section anchor="interaction-ratelimit">
+        <name>draft-ietf-httpapi-ratelimit-headers</name>
+
+        <t>The RateLimit header fields defined in
+        <xref target="I-D.ietf-httpapi-ratelimit-headers"/> apply to HTTP request
+        rates for any endpoint, including job status polling endpoints.</t>
+
+        <t>The "retryAfter" extension member defined in this document
+        applies to job resubmission intervals.  These are orthogonal
+        concerns.</t>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  7. Batch Operations                                          -->
+    <!-- ============================================================ -->
+    <section anchor="batch">
+      <name>Batch Operations</name>
+
+      <section anchor="batch-results">
+        <name>The "results" Extension Member</name>
+
+        <t>For batch operations that produce multiple outputs, this document
+        defines the "results" extension member: an array of per-item
+        outcome objects.</t>
+
+        <t>Each object in the array <bcp14>MUST</bcp14> contain:</t>
+
+        <ul>
+          <li>"itemId" (string): An identifier for the item within the
+          batch.  The value is server-defined and <bcp14>SHOULD</bcp14> correspond
+          to an identifier from the original batch request.  If the
+          original batch request does not assign item identifiers,
+          the server <bcp14>SHOULD</bcp14> assign them (e.g., zero-based array
+          indices as strings: "0", "1", "2") and document the
+          assignment scheme in the API specification.</li>
+
+          <li>"status" (string): A terminal job status value from
+          <xref target="status-registry"/>.  Note: "COMPLETED_WITH_ERRORS" is not valid
+          for individual batch items because a single item cannot
+          itself be a partial batch; only the top-level batch
+          "jobStatus" uses this value.</li>
+        </ul>
+
+        <t>Each object <bcp14>MAY</bcp14> additionally contain:</t>
+
+        <ul>
+          <li>"detail" (string): A human-readable description of the outcome.</li>
+          <li>"retryable" (boolean): Whether this specific item can be retried.</li>
+          <li>"processingStage" (string): The stage at which this item failed.</li>
+        </ul>
+
+        <section anchor="batch-payload-size">
+          <name>Payload Size Considerations</name>
+
+          <t>For large batches (hundreds or thousands of items), including
+          every item in the "results" array may produce an impractically
+          large payload.  Servers <bcp14>SHOULD</bcp14> apply the following strategies:</t>
+
+          <ul>
+            <li>Include only failed items in "results" when the batch
+            jobStatus is "COMPLETED_WITH_ERRORS", and note the omission
+            in the "detail" member (e.g., "3 of 5000 items failed;
+            only failed items are listed").</li>
+
+            <li><t>Define a maximum number of items in "results" (documented
+            in the API specification) and provide a link to a paginated
+            resource for the complete result set.  Example:</t>
+            <sourcecode type="json">"detail": "150 of 10000 items failed. First 50 shown.",
+"results": [ "... 50 items ..." ]</sourcecode>
+            <t>With a "Link" header or body link to the full result set.</t></li>
+
+            <li>For very large batches, consider omitting "results" entirely
+            and providing only a summary in "detail" with a link to
+            the detailed results.</li>
+          </ul>
+
+          <t>This document does not define a pagination mechanism for
+          "results"; pagination is left to the API specification.</t>
+        </section>
+      </section>
+
+      <section anchor="partial-failure">
+        <name>Partial Failure Semantics</name>
+
+        <t>When a batch contains both successes and failures:</t>
+
+        <ul>
+          <li>The "jobStatus" <bcp14>SHOULD</bcp14> be "COMPLETED_WITH_ERRORS".</li>
+
+          <li>The "status" member (HTTP status equivalent) <bcp14>SHOULD</bcp14> be 207
+          (Multi-Status), as defined in <xref target="RFC4918"/> Section 13.  Note
+          that 207 was originally defined for WebDAV; its use in JSON
+          batch APIs is a widely adopted industry convention.</li>
+
+          <li>The "detail" member <bcp14>SHOULD</bcp14> summarize the outcome
+          (e.g., "3 of 5 items completed successfully").</li>
+        </ul>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  8. JSON Schema                                               -->
+    <!-- ============================================================ -->
+    <section anchor="json-schema">
+      <name>JSON Schema</name>
+
+      <t>The following JSON Schema <xref target="JSON-SCHEMA"/> defines the extension
+      members introduced by this document.  It is designed to be
+      composed (via "allOf" or "$ref") with the Problem Details schema
+      from Appendix A of <xref target="RFC9457"/>.</t>
+
+      <sourcecode type="json"><![CDATA[{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/async-job-problem-details",
+  "title": "Async Job Problem Details Extensions",
+  "description": "Extension members for RFC 9457 Problem Details objects that describe asynchronous job outcomes.",
+  "type": "object",
+  "properties": {
+    "jobId": {
+      "type": "string",
+      "description": "Unique identifier for the async job.",
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "jobStatus": {
+      "type": "string",
+      "description": "Current state of the async job. Registered values are ACCEPTED, PROCESSING, COMPLETED, FAILED, CANCELLED, TIMED_OUT, and COMPLETED_WITH_ERRORS. Servers MAY define additional values per Section 4.3.",
+      "examples": ["FAILED", "COMPLETED", "TIMED_OUT"]
+    },
+    "submittedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp (UTC) when the job was accepted for processing.",
+      "examples": ["2026-02-26T10:00:00Z"]
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp (UTC) when the job reached a terminal state.",
+      "examples": ["2026-02-26T10:00:05Z"]
+    },
+    "retryable": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the client should retry the job with the same input."
+    },
+    "retryAfter": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds to wait before retrying. Only meaningful when retryable is true."
+    },
+    "processingStage": {
+      "type": "string",
+      "description": "The pipeline stage at which the failure occurred.",
+      "examples": ["validation", "rendering", "conversion"]
+    },
+    "correlationId": {
+      "type": "string",
+      "description": "Client-supplied correlation identifier from the originating request.",
+      "examples": ["4bf92f3577b34da6a3ce929d0e0e4736"]
+    },
+    "results": {
+      "type": "array",
+      "description": "Per-item outcomes for batch operations.",
+      "items": {
+        "type": "object",
+        "required": ["itemId", "status"],
+        "properties": {
+          "itemId": {
+            "type": "string",
+            "description": "Identifier for the batch item."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "COMPLETED",
+              "FAILED",
+              "CANCELLED",
+              "TIMED_OUT"
+            ],
+            "description": "Terminal outcome for this item."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable outcome description."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether this item can be retried."
+          },
+          "processingStage": {
+            "type": "string",
+            "description": "Stage at which this item failed."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}]]></sourcecode>
+
+      <t>Note: The "jobStatus" property does not use a JSON Schema "enum"
+      constraint because <xref target="extensibility"/> allows servers to define additional
+      status values.  Validators that wish to restrict values to the
+      registered set <bcp14>MAY</bcp14> add an "enum" constraint locally, but <bcp14>SHOULD</bcp14>
+      accept unrecognized values gracefully in production.</t>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  9. Security Considerations                                   -->
+    <!-- ============================================================ -->
+    <section anchor="security">
+      <name>Security Considerations</name>
+
+      <section anchor="sec-info-exposure">
+        <name>Information Exposure</name>
+
+        <t>The extension members defined here can reveal internal
+        architecture details.  Servers <bcp14>MUST</bcp14> consider what information
+        is appropriate for their audience:</t>
+
+        <ul>
+          <li>"processingStage" reveals pipeline structure.  For external-facing
+          APIs, servers <bcp14>SHOULD</bcp14> use generic stage names
+          ("processing", "conversion") rather than implementation-specific
+          names ("kafka-consumer-group-rebalance",
+          "s3-multipart-upload").</li>
+
+          <li>"jobId" values <bcp14>MUST NOT</bcp14> encode sensitive data (e.g., user IDs,
+          database primary keys).</li>
+
+          <li>"detail" messages <bcp14>MUST NOT</bcp14> include stack traces, internal
+          hostnames, database queries, or file system paths.</li>
+        </ul>
+      </section>
+
+      <section anchor="sec-correlation-injection">
+        <name>Correlation ID Injection</name>
+
+        <t>The "correlationId" is client-supplied and <bcp14>MUST</bcp14> be treated as
+        untrusted input.</t>
+
+        <ul>
+          <li>Servers <bcp14>MUST</bcp14> sanitize the value before including it in any
+          output context -- log files, HTTP headers, HTML pages,
+          database queries, or template rendering -- to prevent
+          injection attacks including log injection (newline injection,
+          ANSI escape sequences), HTTP header injection (CRLF
+          injection), and cross-site scripting (XSS).</li>
+
+          <li>Servers <bcp14>SHOULD</bcp14> enforce a maximum length (e.g., 256 characters)
+          and restrict the character set (e.g., alphanumeric, hyphens,
+          underscores, periods).</li>
+
+          <li>Servers <bcp14>MUST NOT</bcp14> use the correlation ID in SQL queries,
+          template rendering, or any context where injection is possible,
+          without proper escaping.</li>
+        </ul>
+      </section>
+
+      <section anchor="sec-enumeration">
+        <name>Job Identifier Enumeration</name>
+
+        <t>If job identifiers are sequential or predictable, an attacker
+        can enumerate job status resources belonging to other clients.</t>
+
+        <ul>
+          <li>Servers <bcp14>MUST</bcp14> use unguessable identifiers.  UUIDv4 or UUIDv7
+          <xref target="RFC9562"/> are <bcp14>RECOMMENDED</bcp14>.</li>
+
+          <li>Servers <bcp14>SHOULD</bcp14> enforce authorization on job status resources:
+          a client <bcp14>MUST</bcp14> only be able to access jobs it submitted.</li>
+
+          <li>Servers <bcp14>SHOULD</bcp14> implement rate limiting on the job status
+          endpoint to slow enumeration attempts.</li>
+        </ul>
+      </section>
+
+      <section anchor="sec-retry-amplification">
+        <name>Retry Amplification</name>
+
+        <t>A malicious or compromised server could return "retryable": true
+        with "retryAfter": 0 to induce clients to retry in a tight loop,
+        creating a self-inflicted denial of service.</t>
+
+        <t>Clients <bcp14>MUST</bcp14> enforce:</t>
+
+        <ul>
+          <li>A maximum retry count (e.g., 5 attempts).</li>
+
+          <li>A minimum backoff floor (e.g., 1 second), regardless of the
+          server's "retryAfter" value.  A "retryAfter" value of 0
+          <bcp14>MUST NOT</bcp14> be interpreted as "retry immediately".</li>
+
+          <li>Exponential backoff with jitter for successive retries.</li>
+        </ul>
+      </section>
+
+      <section anchor="sec-timing">
+        <name>Timing Side Channels</name>
+
+        <t>The "submittedAt" and "completedAt" timestamps reveal processing
+        duration.  In sensitive contexts, this could leak information
+        about:</t>
+
+        <ul>
+          <li>Server load (longer processing times indicate high load).</li>
+          <li>Input complexity (more complex inputs may take longer).</li>
+          <li>Conditional branching (different code paths take different
+          amounts of time).</li>
+        </ul>
+
+        <t>Servers operating in high-security environments <bcp14>MAY</bcp14> omit these
+        members or round them to reduce precision.</t>
+      </section>
+
+      <section anchor="sec-batch-scoping">
+        <name>Batch Results Information Scoping</name>
+
+        <t>In multi-tenant systems where a batch may contain items
+        belonging to different authorization domains, the "results"
+        array <bcp14>MUST</bcp14> only include items that the requesting client is
+        authorized to view.  Servers <bcp14>MUST NOT</bcp14> leak information about
+        other tenants' items through the "results" array, the "detail"
+        summary, or the item count.</t>
+      </section>
+
+      <section anchor="sec-privacy">
+        <name>Privacy Considerations</name>
+
+        <t>The extension members defined here may constitute or contain
+        personally identifiable information (PII):</t>
+
+        <ul>
+          <li>"jobId" values, if correlated with external data, could
+          identify individual users or transactions.</li>
+
+          <li>"correlationId" values are client-supplied and may contain
+          user identifiers, session tokens, or other PII.</li>
+
+          <li>"submittedAt" and "completedAt" timestamps can reveal usage
+          patterns that may be attributable to individuals.</li>
+        </ul>
+
+        <t>Servers <bcp14>SHOULD</bcp14> evaluate the privacy implications of including
+        these members in responses that may be logged, cached, or
+        forwarded through intermediaries.  In jurisdictions with data
+        protection regulations (e.g., GDPR, CCPA), operators <bcp14>SHOULD</bcp14>
+        ensure that problem details objects containing PII are treated
+        as personal data for retention and access control purposes.</t>
+
+        <t>Servers <bcp14>SHOULD NOT</bcp14> include these extension members in responses
+        that are cacheable or served to unauthenticated clients unless
+        the information is already public.</t>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  10. IANA Considerations                                      -->
+    <!-- ============================================================ -->
+    <section anchor="iana">
+      <name>IANA Considerations</name>
+
+      <section anchor="iana-extension-members">
+        <name>Problem Details Extension Members</name>
+
+        <t>This document defines extension members for <xref target="RFC9457"/> problem
+        details objects per the extension mechanism in Section 3.2 of
+        <xref target="RFC9457"/>.  As <xref target="RFC9457"/> does not establish a registry for
+        extension members, the members defined in this document
+        ("jobId", "jobStatus", "submittedAt", "completedAt",
+        "retryable", "retryAfter", "processingStage", "correlationId",
+        and "results") are specified here and do not require IANA
+        registration.</t>
+
+        <t>Implementers that define additional extension members for
+        async job problem details <bcp14>SHOULD</bcp14> choose names that do not
+        conflict with the members defined in this document.</t>
+      </section>
+
+      <section anchor="iana-status-registry">
+        <name>Job Status Value Registry</name>
+
+        <t>This document requests that IANA create a "Problem Details Async
+        Job Status Values" registry with the initial entries from
+        <xref target="tbl-status-values"/> (<xref target="initial-values"/>).</t>
+
+        <t>Registration policy: Specification Required <xref target="RFC8126"/>.</t>
+
+        <t>Each registration <bcp14>MUST</bcp14> include:</t>
+
+        <ul>
+          <li>Status Value: An UPPER_SNAKE_CASE string (e.g., "PAUSED").</li>
+          <li>Terminal: Whether this status is terminal (yes/no).</li>
+          <li>Description: A brief description of the status meaning.</li>
+          <li>Reference: A reference to the specification defining the status value.</li>
+        </ul>
+
+        <t>The designated expert(s) <bcp14>SHOULD</bcp14> verify that proposed values
+        use UPPER_SNAKE_CASE, do not duplicate the semantics of
+        existing registered values, and are clearly documented as
+        either terminal or non-terminal.</t>
+      </section>
+
+      <section anchor="iana-problem-types">
+        <name>Problem Type URIs</name>
+
+        <t>This document does not register any problem type URIs.  The
+        "type" member in the examples uses illustrative URIs under the
+        "api.example.com" domain.</t>
+
+        <t>Servers <bcp14>SHOULD</bcp14> define their own problem type URIs under a domain
+        they control.  When async job extension members are present, the
+        "type" member <bcp14>SHOULD NOT</bcp14> be "about:blank"; a specific URI
+        helps consumers distinguish async job failures from generic HTTP
+        errors.  See <xref target="RFC9457"/> Section 4.2.1 for guidance on using
+        "about:blank".</t>
+      </section>
+    </section>
+
+    <!-- ============================================================ -->
+    <!--  11. Examples                                                 -->
+    <!-- ============================================================ -->
+    <section anchor="examples">
+      <name>Examples</name>
+
+      <t>All examples are complete problem details objects that validate
+      against the schema in <xref target="json-schema"/>.</t>
+
+      <section anchor="ex-rendering">
+        <name>HTTP Response: Document Rendering Failure</name>
+
+        <t>A document generation API processed a PDF request asynchronously.
+        The rendering stage failed.  The client discovers this by polling
+        the job status resource.</t>
+
+        <t>HTTP context:</t>
+
+        <sourcecode type="http"><![CDATA[GET /api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000 HTTP/1.1
+Host: api.example.com
+
+HTTP/1.1 200 OK
+Content-Type: application/problem+json]]></sourcecode>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/rendering-failed",
+  "title": "Document Rendering Failed",
+  "status": 500,
+  "detail": "Template 'invoice-v2' contains an unclosed element at line 87",
+  "instance": "/api/v1/documents/jobs/550e8400-e29b-41d4-a716-446655440000",
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T10:00:00Z",
+  "completedAt": "2026-02-26T10:00:03Z",
+  "retryable": false,
+  "processingStage": "rendering",
+  "correlationId": "4bf92f3577b34da6a3ce929d0e0e4736"
+}]]></sourcecode>
+
+        <t>Note: The HTTP status is 200 (the status check succeeded).
+        The "status": 500 inside the object indicates the equivalent
+        synchronous failure code.  This distinction is intentional:
+        the client's request to check the job status was successful
+        (HTTP 200); the job itself failed (Problem Details status 500).
+        Client libraries that interpret "application/problem+json" as
+        an error signal <bcp14>SHOULD</bcp14> inspect the HTTP status code first; a
+        200 response with Problem Details content indicates a
+        successfully retrieved failure report, not a request failure.</t>
+      </section>
+
+      <section anchor="ex-timeout">
+        <name>HTTP Response: Job Timeout with Retry</name>
+
+        <t>A report generation job exceeded the 300-second limit.  The
+        server indicates the failure is transient and suggests retrying
+        after 60 seconds.</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/job-timed-out",
+  "title": "Job Processing Timed Out",
+  "status": 504,
+  "detail": "Job exceeded maximum processing time of 300s",
+  "jobId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "jobStatus": "TIMED_OUT",
+  "submittedAt": "2026-02-26T09:00:00Z",
+  "completedAt": "2026-02-26T09:05:00Z",
+  "retryable": true,
+  "retryAfter": 60,
+  "processingStage": "processing"
+}]]></sourcecode>
+      </section>
+
+      <section anchor="ex-kafka">
+        <name>Kafka Message: PDF Conversion Failure</name>
+
+        <t>A PDF generation service publishes a failure to a Kafka result
+        topic.  No HTTP headers are available; the "retryAfter" member
+        (absent here because retryable is false) would be the sole
+        mechanism for conveying retry guidance if present.</t>
+
+        <t>Kafka message:</t>
+        <sourcecode type=""><![CDATA[Topic:   com.example.pdf-job.result.v1
+Key:     d4735e3a-265e-16d0-8f24-2de10e933e80
+Headers: content-type=application/problem+json
+Value:]]></sourcecode>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/conversion-failed",
+  "title": "PDF Conversion Failed",
+  "status": 502,
+  "detail": "iText HTML-to-PDF conversion failed: malformed CSS at line 15",
+  "jobId": "d4735e3a-265e-16d0-8f24-2de10e933e80",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T16:30:00Z",
+  "completedAt": "2026-02-26T16:30:02Z",
+  "retryable": false,
+  "processingStage": "conversion",
+  "correlationId": "monthly-report-2026-02"
+}]]></sourcecode>
+
+        <t>Note: The "retryAfter" member is absent because the failure is
+        not retryable.  The "status": 502 indicates the equivalent HTTP
+        status; it is not an HTTP response code in this context.</t>
+      </section>
+
+      <section anchor="ex-webhook">
+        <name>Webhook Callback: Export Completed with Errors</name>
+
+        <t>A data export service delivers a batch result via webhook.</t>
+
+        <sourcecode type="http"><![CDATA[POST /webhooks/export-results HTTP/1.1
+Host: client.example.com
+Content-Type: application/problem+json
+Signature: sig1=:BASE64SIGNATURE:
+Signature-Input: sig1=("content-type" "content-digest");keyid="server-key-1";created=1740567600]]></sourcecode>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/batch-partial",
+  "title": "Data Export Partially Failed",
+  "status": 207,
+  "detail": "8 of 10 records exported successfully",
+  "jobId": "export-batch-20260226",
+  "jobStatus": "COMPLETED_WITH_ERRORS",
+  "submittedAt": "2026-02-26T12:00:00Z",
+  "completedAt": "2026-02-26T12:15:00Z",
+  "results": [
+    {
+      "itemId": "rec-007",
+      "status": "FAILED",
+      "detail": "Record exceeds maximum size (10MB)",
+      "retryable": false
+    },
+    {
+      "itemId": "rec-009",
+      "status": "FAILED",
+      "detail": "Downstream storage timeout",
+      "retryable": true,
+      "processingStage": "storage"
+    }
+  ]
+}]]></sourcecode>
+
+        <t>Note: Only failed items are included in "results" to reduce
+        payload size.  The webhook request itself uses HTTP Message
+        Signatures <xref target="RFC9421"/> for authenticity.</t>
+      </section>
+
+      <section anchor="ex-sse">
+        <name>Server-Sent Event: Processing Stage Update</name>
+
+        <t>A Server-Sent Event stream delivers a failure notification.</t>
+
+        <sourcecode type=""><![CDATA[event: job-failed
+id: 550e8400-e29b-41d4-a716-446655440000
+data: {"type":"https://api.example.com/problems/rendering-failed",
+data:  "title":"Document Rendering Failed","status":500,
+data:  "jobId":"550e8400","jobStatus":"FAILED",
+data:  "submittedAt":"2026-02-26T10:00:00Z",
+data:  "completedAt":"2026-02-26T10:00:03Z",
+data:  "retryable":false,"processingStage":"rendering"}]]></sourcecode>
+      </section>
+
+      <section anchor="ex-batch">
+        <name>Batch: Partial Failure</name>
+
+        <t>Three certificate generation requests; two succeed, one fails.</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/batch-partial",
+  "title": "Batch Processing Partially Failed",
+  "status": 207,
+  "detail": "2 of 3 certificates generated successfully",
+  "jobId": "batch-a1b2c3d4",
+  "jobStatus": "COMPLETED_WITH_ERRORS",
+  "submittedAt": "2026-02-26T14:00:00Z",
+  "completedAt": "2026-02-26T14:00:12Z",
+  "results": [
+    {
+      "itemId": "cert-001",
+      "status": "COMPLETED"
+    },
+    {
+      "itemId": "cert-002",
+      "status": "FAILED",
+      "detail": "Required field 'recipientName' missing",
+      "retryable": false,
+      "processingStage": "validation"
+    },
+    {
+      "itemId": "cert-003",
+      "status": "COMPLETED"
+    }
+  ]
+}]]></sourcecode>
+      </section>
+
+      <section anchor="ex-success">
+        <name>HTTP Response: Successful Job Completion</name>
+
+        <t>The extension members are not limited to failure reporting.
+        A server <bcp14>MAY</bcp14> include them in a successful job status response
+        to provide timing and identification context.</t>
+
+        <sourcecode type="http"><![CDATA[GET /api/v1/documents/jobs/a1b2c3d4-5678-90ab-cdef-1234567890ab HTTP/1.1
+Host: api.example.com
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Link: <https://api.example.com/api/v1/documents/results/a1b2c3d4>;
+      rel="https://api.example.com/rels/job-result"]]></sourcecode>
+
+        <sourcecode type="json"><![CDATA[{
+  "jobId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "jobStatus": "COMPLETED",
+  "submittedAt": "2026-02-26T10:00:00Z",
+  "completedAt": "2026-02-26T10:00:04Z",
+  "correlationId": "invoice-batch-2026-02-26"
+}]]></sourcecode>
+
+        <t>Note: The Content-Type is "application/json", not
+        "application/problem+json", because this is not an error
+        response.  The extension members defined in this document are
+        JSON members that <bcp14>MAY</bcp14> appear in any JSON object; they are not
+        restricted to <xref target="RFC9457"/> problem details objects.  However,
+        when reporting failures, "application/problem+json" <bcp14>SHOULD</bcp14> be
+        used per <xref target="RFC9457"/>.</t>
+      </section>
+
+      <section anchor="ex-kafka-transient">
+        <name>Kafka Message: Transient Failure with Retry Guidance</name>
+
+        <t>A report generation service publishes a transient failure to a
+        Kafka result topic, demonstrating the transport-independence
+        value of the "retryAfter" member.</t>
+
+        <t>Kafka message:</t>
+        <sourcecode type=""><![CDATA[Topic:   com.example.report-job.result.v1
+Key:     e5f6a7b8-9012-3456-7890-abcdef123456
+Headers: content-type=application/problem+json
+Value:]]></sourcecode>
+
+        <sourcecode type="json"><![CDATA[{
+  "type": "https://api.example.com/problems/downstream-unavailable",
+  "title": "Downstream Service Temporarily Unavailable",
+  "status": 503,
+  "detail": "Data warehouse connection pool exhausted; service is expected to recover within 60 seconds",
+  "jobId": "e5f6a7b8-9012-3456-7890-abcdef123456",
+  "jobStatus": "FAILED",
+  "submittedAt": "2026-02-26T18:00:00Z",
+  "completedAt": "2026-02-26T18:00:01Z",
+  "retryable": true,
+  "retryAfter": 60,
+  "processingStage": "processing",
+  "correlationId": "weekly-report-2026-w09"
+}]]></sourcecode>
+
+        <t>Note: In an HTTP context, the server would also include a
+        "Retry-After: 60" header.  In this Kafka context, the
+        "retryAfter" member is the only way to convey the retry
+        interval to the consumer.</t>
+      </section>
+    </section>
+  </middle>
+
+  <back>
+    <!-- ============================================================ -->
+    <!--  References                                                   -->
+    <!-- ============================================================ -->
+    <references>
+      <name>References</name>
+
+      <references>
+        <name>Normative References</name>
+
+        <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119">
+          <front>
+            <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+            <author fullname="S. Bradner" initials="S." surname="Bradner"/>
+            <date month="March" year="1997"/>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="2119"/>
+          <seriesInfo name="DOI" value="10.17487/RFC2119"/>
+        </reference>
+
+        <reference anchor="RFC3339" target="https://www.rfc-editor.org/info/rfc3339">
+          <front>
+            <title>Date and Time on the Internet: Timestamps</title>
+            <author fullname="G. Klyne" initials="G." surname="Klyne"/>
+            <author fullname="C. Newman" initials="C." surname="Newman"/>
+            <date month="July" year="2002"/>
+          </front>
+          <seriesInfo name="RFC" value="3339"/>
+          <seriesInfo name="DOI" value="10.17487/RFC3339"/>
+        </reference>
+
+        <reference anchor="RFC7240" target="https://www.rfc-editor.org/info/rfc7240">
+          <front>
+            <title>Prefer Header for HTTP</title>
+            <author fullname="J. Snell" initials="J." surname="Snell"/>
+            <date month="June" year="2014"/>
+          </front>
+          <seriesInfo name="RFC" value="7240"/>
+          <seriesInfo name="DOI" value="10.17487/RFC7240"/>
+        </reference>
+
+        <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174">
+          <front>
+            <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+            <author fullname="B. Leiba" initials="B." surname="Leiba"/>
+            <date month="May" year="2017"/>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="8174"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8174"/>
+        </reference>
+
+        <reference anchor="RFC8259" target="https://www.rfc-editor.org/info/rfc8259">
+          <front>
+            <title>The JavaScript Object Notation (JSON) Data Interchange Format</title>
+            <author fullname="T. Bray" initials="T." surname="Bray" role="editor"/>
+            <date month="December" year="2017"/>
+          </front>
+          <seriesInfo name="STD" value="90"/>
+          <seriesInfo name="RFC" value="8259"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8259"/>
+        </reference>
+
+        <reference anchor="RFC8288" target="https://www.rfc-editor.org/info/rfc8288">
+          <front>
+            <title>Web Linking</title>
+            <author fullname="M. Nottingham" initials="M." surname="Nottingham"/>
+            <date month="October" year="2017"/>
+          </front>
+          <seriesInfo name="RFC" value="8288"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8288"/>
+        </reference>
+
+        <reference anchor="RFC9110" target="https://www.rfc-editor.org/info/rfc9110">
+          <front>
+            <title>HTTP Semantics</title>
+            <author fullname="R. Fielding" initials="R." surname="Fielding" role="editor"/>
+            <author fullname="M. Nottingham" initials="M." surname="Nottingham" role="editor"/>
+            <author fullname="J. Reschke" initials="J." surname="Reschke" role="editor"/>
+            <date month="June" year="2022"/>
+          </front>
+          <seriesInfo name="STD" value="97"/>
+          <seriesInfo name="RFC" value="9110"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9110"/>
+        </reference>
+
+        <reference anchor="RFC9457" target="https://www.rfc-editor.org/info/rfc9457">
+          <front>
+            <title>Problem Details for HTTP APIs</title>
+            <author fullname="M. Nottingham" initials="M." surname="Nottingham"/>
+            <author fullname="E. Wilde" initials="E." surname="Wilde"/>
+            <author fullname="S. Dalal" initials="S." surname="Dalal"/>
+            <date month="July" year="2023"/>
+          </front>
+          <seriesInfo name="RFC" value="9457"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9457"/>
+        </reference>
+
+        <reference anchor="RFC9562" target="https://www.rfc-editor.org/info/rfc9562">
+          <front>
+            <title>Universally Unique IDentifiers (UUIDs)</title>
+            <author fullname="K. Davis" initials="K." surname="Davis"/>
+            <author fullname="B. Peabody" initials="B." surname="Peabody"/>
+            <author fullname="P. Leach" initials="P." surname="Leach"/>
+            <date month="May" year="2024"/>
+          </front>
+          <seriesInfo name="RFC" value="9562"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9562"/>
+        </reference>
+      </references>
+
+      <references>
+        <name>Informative References</name>
+
+        <reference anchor="RFC4918" target="https://www.rfc-editor.org/info/rfc4918">
+          <front>
+            <title>HTTP Extensions for Web Distributed Authoring and Versioning (WebDAV)</title>
+            <author fullname="L. Dusseault" initials="L." surname="Dusseault" role="editor"/>
+            <date month="June" year="2007"/>
+          </front>
+          <seriesInfo name="RFC" value="4918"/>
+          <seriesInfo name="DOI" value="10.17487/RFC4918"/>
+        </reference>
+
+        <reference anchor="RFC6585" target="https://www.rfc-editor.org/info/rfc6585">
+          <front>
+            <title>Additional HTTP Status Codes</title>
+            <author fullname="M. Nottingham" initials="M." surname="Nottingham"/>
+            <author fullname="R. Fielding" initials="R." surname="Fielding"/>
+            <date month="April" year="2012"/>
+          </front>
+          <seriesInfo name="RFC" value="6585"/>
+          <seriesInfo name="DOI" value="10.17487/RFC6585"/>
+        </reference>
+
+        <reference anchor="RFC6901" target="https://www.rfc-editor.org/info/rfc6901">
+          <front>
+            <title>JavaScript Object Notation (JSON) Pointer</title>
+            <author fullname="P. Bryan" initials="P." surname="Bryan" role="editor"/>
+            <author fullname="K. Zyp" initials="K." surname="Zyp"/>
+            <author fullname="M. Nottingham" initials="M." surname="Nottingham" role="editor"/>
+            <date month="April" year="2013"/>
+          </front>
+          <seriesInfo name="RFC" value="6901"/>
+          <seriesInfo name="DOI" value="10.17487/RFC6901"/>
+        </reference>
+
+        <reference anchor="RFC8126" target="https://www.rfc-editor.org/info/rfc8126">
+          <front>
+            <title>Guidelines for Writing an IANA Considerations Section in RFCs</title>
+            <author fullname="M. Cotton" initials="M." surname="Cotton"/>
+            <author fullname="B. Leiba" initials="B." surname="Leiba"/>
+            <author fullname="T. Narten" initials="T." surname="Narten"/>
+            <date month="June" year="2017"/>
+          </front>
+          <seriesInfo name="BCP" value="26"/>
+          <seriesInfo name="RFC" value="8126"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8126"/>
+        </reference>
+
+        <reference anchor="RFC8631" target="https://www.rfc-editor.org/info/rfc8631">
+          <front>
+            <title>Link Relation Types for Web Services</title>
+            <author fullname="E. Wilde" initials="E." surname="Wilde"/>
+            <date month="July" year="2019"/>
+          </front>
+          <seriesInfo name="RFC" value="8631"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8631"/>
+        </reference>
+
+        <reference anchor="RFC9421" target="https://www.rfc-editor.org/info/rfc9421">
+          <front>
+            <title>HTTP Message Signatures</title>
+            <author fullname="A. Backman" initials="A." surname="Backman" role="editor"/>
+            <author fullname="J. Richer" initials="J." surname="Richer" role="editor"/>
+            <author fullname="M. Sporny" initials="M." surname="Sporny"/>
+            <date month="February" year="2024"/>
+          </front>
+          <seriesInfo name="RFC" value="9421"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9421"/>
+        </reference>
+
+        <reference anchor="RFC9512" target="https://www.rfc-editor.org/info/rfc9512">
+          <front>
+            <title>YAML Media Type</title>
+            <author fullname="E. Wilde" initials="E." surname="Wilde"/>
+            <author fullname="R. Amsüss" initials="R." surname="Amsüss"/>
+            <date month="February" year="2024"/>
+          </front>
+          <seriesInfo name="RFC" value="9512"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9512"/>
+        </reference>
+
+        <reference anchor="JSON-SCHEMA">
+          <front>
+            <title>JSON Schema: A Media Type for Describing JSON Documents</title>
+            <author fullname="A. Wright" initials="A." surname="Wright"/>
+            <author fullname="H. Andrews" initials="H." surname="Andrews"/>
+            <author fullname="B. Hutton" initials="B." surname="Hutton"/>
+            <author fullname="G. Dennis" initials="G." surname="Dennis"/>
+            <date month="June" year="2022"/>
+          </front>
+          <seriesInfo name="Internet-Draft" value="draft-bhutton-json-schema-01"/>
+        </reference>
+
+        <reference anchor="ASYNCAPI" target="https://www.asyncapi.com/docs/reference/specification/v3.0.0">
+          <front>
+            <title>AsyncAPI Specification</title>
+            <author>
+              <organization>AsyncAPI Initiative</organization>
+            </author>
+            <date year="2024" month="February"/>
+          </front>
+          <refcontent>Version 3.0.0</refcontent>
+        </reference>
+
+        <reference anchor="W3C.TRACE-CONTEXT" target="https://www.w3.org/TR/trace-context/">
+          <front>
+            <title>Trace Context</title>
+            <author fullname="W. Rodrigues" initials="W." surname="Rodrigues"/>
+            <author fullname="S. Kanzhelev" initials="S." surname="Kanzhelev"/>
+            <author fullname="J. Mace" initials="J." surname="Mace"/>
+            <author fullname="B. Banerjee" initials="B." surname="Banerjee"/>
+            <date month="November" year="2021"/>
+          </front>
+          <refcontent>W3C Recommendation</refcontent>
+        </reference>
+
+        <reference anchor="W3C.SSE" target="https://www.w3.org/TR/eventsource/">
+          <front>
+            <title>Server-Sent Events</title>
+            <author fullname="I. Hickson" initials="I." surname="Hickson"/>
+            <date month="February" year="2015"/>
+          </front>
+          <refcontent>W3C Recommendation</refcontent>
+        </reference>
+
+        <reference anchor="I-D.ietf-httpapi-idempotency-key-header">
+          <front>
+            <title>The Idempotency-Key HTTP Header Field</title>
+            <author fullname="S. Dalal" initials="S." surname="Dalal"/>
+            <author fullname="J. Jena" initials="J." surname="Jena"/>
+            <date/>
+          </front>
+          <seriesInfo name="Internet-Draft" value="draft-ietf-httpapi-idempotency-key-header"/>
+        </reference>
+
+        <reference anchor="I-D.ietf-httpapi-ratelimit-headers">
+          <front>
+            <title>RateLimit header fields for HTTP</title>
+            <author fullname="R. Polli" initials="R." surname="Polli"/>
+            <author fullname="A. Martinez" initials="A." surname="Martinez"/>
+            <date/>
+          </front>
+          <seriesInfo name="Internet-Draft" value="draft-ietf-httpapi-ratelimit-headers"/>
+        </reference>
+
+        <reference anchor="GOOGLE-AIP-151" target="https://google.aip.dev/151">
+          <front>
+            <title>AIP-151: Long-running operations</title>
+            <author>
+              <organization>Google</organization>
+            </author>
+            <date/>
+          </front>
+        </reference>
+
+        <reference anchor="CLOUDEVENTS" target="https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md">
+          <front>
+            <title>CloudEvents Specification</title>
+            <author>
+              <organization>Cloud Native Computing Foundation</organization>
+            </author>
+            <date/>
+          </front>
+          <refcontent>Version 1.0.2</refcontent>
+        </reference>
+
+        <reference anchor="OPENAPI" target="https://spec.openapis.org/oas/v3.1.0">
+          <front>
+            <title>OpenAPI Specification</title>
+            <author>
+              <organization>OpenAPI Initiative</organization>
+            </author>
+            <date/>
+          </front>
+          <refcontent>Version 3.1.0</refcontent>
+        </reference>
+
+        <reference anchor="IANA.LINK-RELATIONS" target="https://www.iana.org/assignments/link-relations/link-relations.xhtml">
+          <front>
+            <title>Link Relations</title>
+            <author>
+              <organization>IANA</organization>
+            </author>
+            <date/>
+          </front>
+        </reference>
+      </references>
+    </references>
+
+    <!-- ============================================================ -->
+    <!--  Appendices                                                   -->
+    <!-- ============================================================ -->
+    <section anchor="appendix-comparison">
+      <name>Comparison with Industry Patterns</name>
+
+      <t>This appendix provides an expanded comparison of async job error
+      reporting across platforms, illustrating the fragmentation that
+      this specification addresses.</t>
+
+      <section anchor="appendix-aws">
+        <name>AWS Step Functions</name>
+
+        <t>AWS Step Functions represent failures as:</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "executionArn": "arn:aws:states:...",
+  "status": "FAILED",
+  "error": "States.TaskFailed",
+  "cause": "Lambda function threw an exception",
+  "startDate": "2026-02-26T10:00:00.000Z",
+  "stopDate": "2026-02-26T10:00:05.000Z"
+}]]></sourcecode>
+
+        <t>Mapping to this specification: "executionArn" → "jobId",
+        "status" → "jobStatus", "error"+"cause" → "detail",
+        "startDate" → "submittedAt", "stopDate" → "completedAt".
+        No retry guidance.  No processing stage.  Not RFC 9457.</t>
+      </section>
+
+      <section anchor="appendix-google">
+        <name>Google AIP-151 (Long-Running Operations)</name>
+
+        <t>Google uses a Protobuf-based "Operation" resource:</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "name": "operations/abc123",
+  "done": true,
+  "error": {
+    "code": 3,
+    "message": "Invalid template",
+    "details": []
+  }
+}]]></sourcecode>
+
+        <t>Mapping: "name" → "jobId", "done" → terminal state check,
+        "error" → google.rpc.Status (not RFC 9457).  No
+        "submittedAt"/"completedAt".  No retry guidance.  No
+        processing stage.</t>
+      </section>
+
+      <section anchor="appendix-azure">
+        <name>Azure Long-Running Operations</name>
+
+        <t>Azure uses a polling pattern with:</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "id": "job-xyz",
+  "status": "Failed",
+  "error": {
+    "code": "RenderingFailed",
+    "message": "Template syntax error at line 42"
+  },
+  "startTime": "2026-02-26T10:00:00Z",
+  "endTime": "2026-02-26T10:00:05Z"
+}]]></sourcecode>
+
+        <t>Mapping: "id" → "jobId", "status" → "jobStatus",
+        "error" → "detail", "startTime" → "submittedAt",
+        "endTime" → "completedAt".  "retryAfter" sometimes in
+        HTTP header only.  No processing stage.  Not RFC 9457.</t>
+      </section>
+
+      <section anchor="appendix-stripe">
+        <name>Stripe</name>
+
+        <t>Stripe uses:</t>
+
+        <sourcecode type="json"><![CDATA[{
+  "id": "pi_abc123",
+  "status": "failed",
+  "last_payment_error": {
+    "type": "card_error",
+    "message": "Your card was declined"
+  },
+  "created": 1740567600
+}]]></sourcecode>
+
+        <t>Mapping: "id" → "jobId", "status" → "jobStatus",
+        "last_payment_error" → "detail", "created" → "submittedAt".
+        No completion time.  No retry guidance.  No processing stage.
+        Unix timestamp, not RFC 3339.  Not RFC 9457.</t>
+      </section>
+    </section>
+
+    <section anchor="appendix-design">
+      <name>Design Decisions</name>
+
+      <section anchor="design-extension">
+        <name>Why Extension Members, Not a New Media Type?</name>
+
+        <t>Defining a new media type (e.g., "application/async-job-problem+json")
+        was considered and rejected because:</t>
+
+        <ul>
+          <li><xref target="RFC9457"/> already provides a well-known envelope with
+          Content-Type negotiation ("application/problem+json").</li>
+
+          <li>Extension members integrate seamlessly with existing
+          <xref target="RFC9457"/> infrastructure (exception mappers, middleware,
+          logging).</li>
+
+          <li>Clients that don't understand the extensions can still
+          process the standard Problem Details members ("type",
+          "title", "status", "detail").</li>
+        </ul>
+      </section>
+
+      <section anchor="design-retry-json">
+        <name>Why JSON Members for Retry Instead of Only Headers?</name>
+
+        <t>The "Retry-After" HTTP header field <xref target="RFC9110"/> already exists.
+        The "retryAfter" JSON member was added because:</t>
+
+        <ul>
+          <li>Message broker payloads have no HTTP headers.</li>
+
+          <li>Webhook callbacks use HTTP, but the "Retry-After" header
+          applies to the webhook delivery, not the job retry.</li>
+
+          <li>The JSON member travels with the Problem Details object
+          across all transports without transformation.</li>
+        </ul>
+      </section>
+
+      <section anchor="design-retryable">
+        <name>Why an Explicit "retryable" Boolean?</name>
+
+        <t>The presence of "retryAfter" alone could imply retryability.
+        A separate boolean was added because:</t>
+
+        <ul>
+          <li>Explicitness aids machine readability — no inference needed.</li>
+
+          <li>Some failures are retryable without a specific delay
+          recommendation ("retryable": true without "retryAfter").</li>
+
+          <li>Some APIs may want to convey "retryAfter" for general backoff
+          purposes even on non-retryable errors (<xref target="ext-retryafter"/> allows
+          this in exceptional cases); the explicit boolean prevents
+          ambiguity about whether a retry is advised.</li>
+        </ul>
+      </section>
+
+      <section anchor="design-stage">
+        <name>Why "processingStage" Is a String, Not an Enum?</name>
+
+        <t>Processing pipelines vary too widely across APIs to define a
+        fixed enum.  A free-form string with recommended values
+        (<xref target="tbl-stages"/>) provides flexibility while encouraging consistency
+        through convention.</t>
+      </section>
+
+      <section anchor="design-trace">
+        <name>Why "correlationId" References W3C Trace Context?</name>
+
+        <t>The W3C Trace Context specification <xref target="W3C.TRACE-CONTEXT"/> is the
+        de facto standard for distributed tracing headers.  Referencing
+        it provides interoperability with OpenTelemetry, Jaeger, Zipkin,
+        and other tracing systems without requiring this specification
+        to define its own tracing format.</t>
+      </section>
+    </section>
+
+    <section anchor="appendix-asyncapi">
+      <name>AsyncAPI Integration</name>
+
+      <t>APIs that use AsyncAPI <xref target="ASYNCAPI"/> to document message-driven
+      interfaces can reference this specification in their schemas.</t>
+
+      <t>Example AsyncAPI schema fragment:</t>
+
+      <sourcecode type="yaml"><![CDATA[components:
+  schemas:
+    PdfJobFailedEvent:
+      description: >
+        PDF generation failure report per
+        draft-ratnawat-httpapi-async-problem-details.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          required: [jobId, jobStatus, submittedAt]
+          properties:
+            jobId:
+              type: string
+              format: uuid
+            jobStatus:
+              type: string
+              enum: [FAILED, TIMED_OUT, CANCELLED]
+            submittedAt:
+              type: string
+              format: date-time
+            completedAt:
+              type: string
+              format: date-time
+            retryable:
+              type: boolean
+            retryAfter:
+              type: integer
+              minimum: 0
+            processingStage:
+              type: string
+            correlationId:
+              type: string]]></sourcecode>
+    </section>
+
+    <section anchor="appendix-cloudevents">
+      <name>Relationship to CloudEvents</name>
+
+      <t>CloudEvents <xref target="CLOUDEVENTS"/> is a CNCF specification for describing
+      events in a standard way.  It defines context attributes including
+      "id", "source", "type", and "subject" that overlap conceptually
+      with some members defined here:</t>
+
+      <ul>
+        <li>CloudEvents "id" ≈ "jobId" (event/job identifier)</li>
+        <li>CloudEvents "source" ≈ "instance" (origin of the event)</li>
+        <li>CloudEvents "time" ≈ "completedAt" (timestamp)</li>
+      </ul>
+
+      <t>The specifications are complementary, not competing:</t>
+
+      <ul>
+        <li>CloudEvents defines the event envelope (metadata about the
+        event itself: what happened, where, when).</li>
+
+        <li>This specification defines the event payload content
+        (structured failure context: what failed, at what stage,
+        whether to retry).</li>
+      </ul>
+
+      <t>When using CloudEvents as the transport envelope for async job
+      failure notifications, the problem details object (with the
+      extension members defined here) <bcp14>SHOULD</bcp14> be the CloudEvents
+      "data" payload.  The CloudEvents "datacontenttype" <bcp14>SHOULD</bcp14> be
+      "application/problem+json".</t>
+
+      <t>Example CloudEvents + Problem Details:</t>
+
+      <sourcecode type="json"><![CDATA[{
+  "specversion": "1.0",
+  "id": "evt-550e8400",
+  "source": "/api/v1/documents/generate",
+  "type": "com.example.job.failed",
+  "datacontenttype": "application/problem+json",
+  "data": {
+    "type": "https://api.example.com/problems/rendering-failed",
+    "title": "Document Rendering Failed",
+    "status": 500,
+    "jobId": "550e8400-e29b-41d4-a716-446655440000",
+    "jobStatus": "FAILED",
+    "processingStage": "rendering",
+    "retryable": false
+  }
+}]]></sourcecode>
+    </section>
+
+    <section anchor="appendix-openapi">
+      <name>OpenAPI Integration</name>
+
+      <t>APIs documented with the OpenAPI Specification <xref target="OPENAPI"/> can
+      reference the JSON Schema defined in <xref target="json-schema"/> to describe
+      async job failure responses.</t>
+
+      <t>Example OpenAPI schema fragment (YAML):</t>
+
+      <sourcecode type="yaml"><![CDATA[components:
+  schemas:
+    AsyncJobProblemDetails:
+      description: >
+        RFC 9457 Problem Details extended with async job context
+        per draft-ratnawat-httpapi-async-problem-details.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - $ref: 'https://example.com/schemas/async-job-problem-details'
+
+paths:
+  /api/v1/jobs/{jobId}:
+    get:
+      summary: Check async job status
+      responses:
+        '200':
+          description: >
+            Job status. Content-Type is application/json for
+            non-terminal and COMPLETED states, and
+            application/problem+json for failed states.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/AsyncJobProblemDetails']]></sourcecode>
+    </section>
+
+    <section anchor="appendix-interop">
+      <name>Interoperability Considerations</name>
+
+      <section anchor="interop-partial">
+        <name>Handling Partial Member Sets</name>
+
+        <t>A client that receives a problem details object with some but
+        not all of the extension members defined here <bcp14>SHOULD</bcp14> process
+        the members that are present and ignore the absence of others.
+        For example, a response with "jobId" and "jobStatus" but without
+        "submittedAt" is valid and useful.</t>
+      </section>
+
+      <section anchor="interop-unknown">
+        <name>Handling Unknown Extension Members</name>
+
+        <t>Per <xref target="RFC9457"/> Section 3.2, consumers <bcp14>MUST</bcp14> ignore extension
+        members they do not understand.  This ensures forward
+        compatibility: future revisions of this document may define
+        additional members without breaking existing clients.</t>
+      </section>
+
+      <section anchor="interop-status">
+        <name>Handling Unrecognized Job Status Values</name>
+
+        <t>As specified in <xref target="extensibility"/>, clients that encounter an
+        unrecognized "jobStatus" value <bcp14>SHOULD</bcp14> treat it as non-terminal
+        (equivalent to "PROCESSING").  This provides graceful
+        degradation when a server uses custom status values.</t>
+      </section>
+
+      <section anchor="interop-xml">
+        <name>XML Representation</name>
+
+        <t><xref target="RFC9457"/> defines both JSON and XML representations for problem
+        details.  This document defines extension members for the JSON
+        representation only.  Servers that need to produce XML problem
+        details objects may map the extension members to XML elements
+        using the conventions in <xref target="RFC9457"/> Section 4, but this document
+        does not define a normative XML mapping.</t>
+      </section>
+
+      <section anchor="interop-i18n">
+        <name>Internationalization of "detail"</name>
+
+        <t>The "detail" member is human-readable text.  Per <xref target="RFC9457"/>
+        Section 3.1.4, the language of "detail" and "title" is
+        determined by Content-Language negotiation.</t>
+
+        <t>Servers that serve multilingual audiences <bcp14>SHOULD</bcp14> respect the
+        "Accept-Language" header from the originating request when
+        generating the "detail" text for asynchronous failure reports.
+        When the failure report is delivered via a non-HTTP transport
+        where language negotiation is not available, servers <bcp14>SHOULD</bcp14> use
+        English (en) as the default language and <bcp14>MAY</bcp14> include a
+        "Content-Language" metadata field if the transport supports it.</t>
+      </section>
+    </section>
+
+    <section numbered="false" anchor="acknowledgements">
+      <name>Acknowledgements</name>
+
+      <t>The extension members defined in this document were informed by
+      real-world experience building production asynchronous document
+      generation services that process requests via Apache Kafka.  The
+      challenge of reporting structured errors across synchronous HTTP
+      and asynchronous messaging boundaries motivated this work.</t>
+
+      <t>The author thanks the IETF HTTP API Working Group (httpapi) for
+      their ongoing work on <xref target="RFC9457"/>,
+      <xref target="I-D.ietf-httpapi-idempotency-key-header"/>, and
+      <xref target="I-D.ietf-httpapi-ratelimit-headers"/> -- which
+      collectively address the mechanics of async API patterns and
+      provided the foundation for this complementary specification.</t>
+
+      <t>Google's AIP-151 (Long-Running Operations) <xref target="GOOGLE-AIP-151"/>
+      influenced the status value design, though this specification
+      chose RFC 9457 as the envelope rather than gRPC/Protobuf.</t>
+
+      <t>The CloudEvents specification <xref target="CLOUDEVENTS"/> and the OpenAPI
+      Specification <xref target="OPENAPI"/> informed the transport-independence
+      design principle and the integration guidance in the appendices.</t>
+    </section>
+  </back>
+</rfc>
