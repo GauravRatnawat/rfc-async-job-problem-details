@@ -10,10 +10,13 @@ Thumbs.db
 *~
 
 # xml2rfc build artifacts
-*.txt
-*.html
 *.pdf
+!draft/*.html
+!draft/*.txt
 !examples/*.txt
+
+# Internal review, adoption strategy, and analysis docs
+analysis/
 
 # Node (if using tooling)
 node_modules/
