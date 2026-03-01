@@ -10,18 +10,19 @@ An Internet-Draft extending [RFC 9457 (Problem Details for HTTP APIs)](https://w
 
 HTTP APIs that process work asynchronously need a standard way to report job failures. RFC 9457 provides the error envelope; this document defines extension members that fill it with asynchronous-job-specific context.
 
-Eight extension members are specified:
+Eight core extension members are specified, plus a ninth (`results`) for batch operations:
 
 | Member | Type | Description |
 |---|---|---|
 | `jobId` | string | Unique identifier for the async job |
-| `jobStatus` | string | Current state (ACCEPTED, PROCESSING, COMPLETED, FAILED, CANCELLED, TIMED_OUT) |
+| `jobStatus` | string | Current state (ACCEPTED, PROCESSING, COMPLETED, FAILED, CANCELLED, TIMED_OUT, COMPLETED_WITH_ERRORS) |
 | `submittedAt` | string (date-time) | RFC 3339 timestamp (UTC) when the job was accepted |
 | `completedAt` | string (date-time) | RFC 3339 timestamp (UTC) when the job reached a terminal state |
 | `retryable` | boolean | Whether the client should retry the job |
 | `retryAfter` | integer | Seconds to wait before retrying |
 | `processingStage` | string | Pipeline stage where failure occurred |
 | `correlationId` | string | Client-supplied trace identifier |
+| `results` | array | Per-item outcomes for batch operations |
 
 ## The Problem
 
@@ -69,25 +70,21 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
 ├── CONTRIBUTING.md                    # How to contribute
 ├── LICENSE                            # BSD-3-Clause (IETF Trust)
 ├── draft/
-│   └── draft-ratnawat-httpapi-async-problem-details-00.md   # The Internet-Draft
+│   ├── draft-ratnawat-httpapi-async-problem-details-00.md    # The Internet-Draft (source)
+│   ├── draft-ratnawat-httpapi-async-problem-details-00.xml   # xml2rfc format
+│   ├── draft-ratnawat-httpapi-async-problem-details-00.html  # HTML rendering
+│   └── draft-ratnawat-httpapi-async-problem-details-00.txt   # Plain text rendering
 ├── schema/
-│   └── async-job-problem-details.schema.json                # JSON Schema
-├── examples/
-│   ├── http-rendering-failure.json    # HTTP response example
-│   ├── http-timeout-with-retry.json   # Timeout + retry example
-│   ├── kafka-conversion-failure.json  # Kafka transport example
-│   ├── kafka-transient-failure.json   # Kafka retry guidance example
-│   ├── webhook-batch-partial.json     # Webhook batch example
-│   ├── sse-job-failed.txt             # Server-Sent Events example
-│   ├── batch-partial-failure.json     # Batch partial failure
-│   └── successful-completion.json     # Success example
-├── analysis/
-│   ├── RFC_ANALYSIS.md                # RFC compliance analysis (origin project)
-│   └── RFC_LANDSCAPE_ANALYSIS.md      # Landscape analysis: does this RFC make sense?
-├── review/
-│   └── RFC_REVIEW.md                  # Simulated IETF Area Director review
-└── adoption/
-    └── RFC_ADOPTION_PLAYBOOK.md       # Strategy for getting API guidelines to adopt
+│   └── async-job-problem-details.schema.json                 # JSON Schema
+└── examples/
+    ├── http-rendering-failure.json    # HTTP response example
+    ├── http-timeout-with-retry.json   # Timeout + retry example
+    ├── kafka-conversion-failure.json  # Kafka transport example
+    ├── kafka-transient-failure.json   # Kafka retry guidance example
+    ├── webhook-batch-partial.json     # Webhook batch example
+    ├── sse-job-failed.txt             # Server-Sent Events example
+    ├── batch-partial-failure.json     # Batch partial failure
+    └── successful-completion.json     # Success example
 ```
 
 ## Status
@@ -98,7 +95,7 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
 | **Intended status** | Standards Track (may adjust to Informational per WG feedback) |
 | **Target WG** | [IETF HTTPAPI](https://datatracker.ietf.org/wg/httpapi/about/) |
 | **Datatracker** | Not yet submitted |
-| **xml2rfc conversion** | Pending |
+| **xml2rfc conversion** | Complete |
 
 ## Roadmap
 
@@ -106,7 +103,7 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
 - [x] Landscape analysis — verify the gap is real
 - [x] Simulated IETF review — identify and fix issues
 - [x] Adoption playbook — strategy for real-world adoption
-- [ ] Convert to xml2rfc format for IETF submission
+- [x] Convert to xml2rfc format for IETF submission
 - [ ] Build reference implementation (Quarkus / Spring Boot)
 - [ ] Submit PR to Zalando RESTful API Guidelines
 - [ ] Open issue on Microsoft REST API Guidelines
