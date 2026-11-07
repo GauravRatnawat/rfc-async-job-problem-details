@@ -24,24 +24,9 @@ Eight core extension members are specified, plus a ninth (`results`) for batch o
 | `correlationId` | string | Client-supplied trace identifier |
 | `results` | array | Per-item outcomes for batch operations |
 
-## The Problem
-
-Every major platform invents its own async job error format:
-
-```
-AWS Step Functions:  { "executionArn": "...", "status": "FAILED", "error": "...", "cause": "..." }
-Google AIP-151:     { "name": "...", "done": true, "error": { "code": 3, "message": "..." } }
-Azure LRO:          { "id": "...", "status": "Failed", "error": { "code": "...", "message": "..." } }
-Stripe:             { "id": "...", "status": "failed", "last_payment_error": { ... } }
-```
-
-None builds on RFC 9457. None provides transport-independent retry semantics. None includes processing stage identification.
-
-## Key Differentiators
-
-1. **Transport Independence** — The `retryable` + `retryAfter` JSON members work in HTTP responses, Kafka messages, webhooks, and SSE streams (where the `Retry-After` HTTP header is unavailable)
-2. **Processing Stage Identification** — The `processingStage` member tells you *where* in the pipeline the failure occurred
-3. **Built on RFC 9457** — Extends the IETF standard error envelope rather than inventing a new one
+Job failure fields vary by platform. Draft adds shared job context and retry hints across transports.
+See [problem statement](draft/draft-ratnawat-httpapi-async-problem-details-00.html#problem-statement).
+See [platform comparison](draft/draft-ratnawat-httpapi-async-problem-details-00.html#appendix-comparison).
 
 ## Quick Example
 
@@ -62,30 +47,10 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
 }
 ```
 
-## Repository Structure
-
-```
-.
-├── README.md                          # This file
-├── CONTRIBUTING.md                    # How to contribute
-├── LICENSE                            # BSD-3-Clause (IETF Trust)
-├── draft/
-│   ├── draft-ratnawat-httpapi-async-problem-details-00.md    # The Internet-Draft (source)
-│   ├── draft-ratnawat-httpapi-async-problem-details-00.xml   # xml2rfc format
-│   ├── draft-ratnawat-httpapi-async-problem-details-00.html  # HTML rendering
-│   └── draft-ratnawat-httpapi-async-problem-details-00.txt   # Plain text rendering
-├── schema/
-│   └── async-job-problem-details.schema.json                 # JSON Schema
-└── examples/
-    ├── http-rendering-failure.json    # HTTP response example
-    ├── http-timeout-with-retry.json   # Timeout + retry example
-    ├── kafka-conversion-failure.json  # Kafka transport example
-    ├── kafka-transient-failure.json   # Kafka retry guidance example
-    ├── webhook-batch-partial.json     # Webhook batch example
-    ├── sse-job-failed.txt             # Server-Sent Events example
-    ├── batch-partial-failure.json     # Batch partial failure
-    └── successful-completion.json     # Success example
-```
+[Draft source](draft/draft-ratnawat-httpapi-async-problem-details-00.md), [XML](draft/draft-ratnawat-httpapi-async-problem-details-00.xml), [HTML](draft/draft-ratnawat-httpapi-async-problem-details-00.html), [plain text](draft/draft-ratnawat-httpapi-async-problem-details-00.txt).
+[Schema](schema/async-job-problem-details.schema.json).
+[Examples](examples/).
+[How to help](CONTRIBUTING.md).
 
 ## Status
 
@@ -111,18 +76,7 @@ None builds on RFC 9457. None provides transport-independent retry semantics. No
 - [ ] Present at IETF HTTPAPI WG meeting
 - [ ] Seek co-authors from other organizations
 
-## Related Standards
-
-| Standard | Relationship |
-|---|---|
-| [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) | Foundation — this draft extends it |
-| [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110) | HTTP Semantics (202 Accepted) |
-| [RFC 7240](https://www.rfc-editor.org/rfc/rfc7240) | Prefer Header (respond-async) |
-| [RFC 8288](https://www.rfc-editor.org/rfc/rfc8288) | Web Linking |
-| [RFC 9562](https://www.rfc-editor.org/rfc/rfc9562) | UUIDs for jobId |
-| [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) | Timestamps |
-| [CloudEvents](https://cloudevents.io/) | Complementary — defines event envelope |
-| [AsyncAPI](https://www.asyncapi.com/) | Complementary — documentation tool |
+See [how draft works with other standards](draft/draft-ratnawat-httpapi-async-problem-details-00.html#interaction).
 
 ## Author
 
